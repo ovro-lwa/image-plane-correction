@@ -14,7 +14,7 @@ from jaxtyping import Array
 from flow import Flow
 from util import gkern
 
-NVSS_CATALOG = "/fastpool/zwhuang/catalogs/nvss_trim.dat"
+NVSS_CATALOG = "/data/claw/data/nvss_trim.dat"
 VLSSR_CATALOG = "/fastpool/zwhuang/catalogs/vlssr_radecpeak.txt"
 
 Catalog = Union[Literal["NVSS"], Literal["VLSSR"]]
