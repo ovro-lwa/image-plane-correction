@@ -1,6 +1,6 @@
 FROM nvcr.io/nvidia/pytorch:24.07-py3
 WORKDIR /workspace
-RUN pip install scikit-image astropy jupyter matplotlib
+RUN pip install scikit-image astropy jupyter matplotlib casatools casatasks numpy scipy
 RUN git clone https://github.com/opencv/opencv.git
 RUN cd opencv && git checkout 4.x && cd ..
 RUN git clone https://github.com/opencv/opencv_contrib.git
@@ -34,3 +34,7 @@ RUN cd opencv/build && make -j5
 RUN cd opencv/build && make install
 RUN cd opencv/build && ldconfig
 RUN python -c "import cv2; print(cv2.cuda.getCudaEnabledDeviceCount())"
+RUN git clone https://github.com/ovro-lwa/image-plane-correction.git -b cjl/dev
+RUN cd image-plane-correction && pip install .
+RUN mkdir -p /root/.casa/data
+RUN echo measurespath=/root/.casa/data > ~/.casa/data/config.py
