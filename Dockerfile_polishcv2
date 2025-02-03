@@ -7,10 +7,12 @@ RUN git clone https://github.com/opencv/opencv_contrib.git
 RUN cd opencv_contrib && git checkout 4.x && cd ..
 RUN cd opencv && mkdir build && cd build && cmake -D OPENCV_EXTRA_MODULES_PATH=/workspace/opencv_contrib/modules \
   -D CMAKE_INSTALL_PREFIX=/usr/local \
-  -D CUDA_ARCH_BIN=9.0 \
+  -D CUDA_ARCH_BIN=8.6 \
   -D WITH_CUDA=ON \
   -D CMAKE_BUILD_TYPE=RELEASE \
   -D WITH_OPENGL=ON \
+  -D WITH_NVCUVID=OFF \
+  -D WITH_NVCUVENC=OFF \
   -D WITH_CUBLAS=1 \
   -D BUILD_opencv_python3=ON \
   -D ENABLE_FAST_MATH=1 \
@@ -33,8 +35,8 @@ RUN cd opencv && mkdir build && cd build && cmake -D OPENCV_EXTRA_MODULES_PATH=/
 RUN cd opencv/build && make -j5
 RUN cd opencv/build && make install
 RUN cd opencv/build && ldconfig
-RUN python -c "import cv2; print(cv2.cuda.getCudaEnabledDeviceCount())"
 RUN git clone https://github.com/ovro-lwa/image-plane-correction.git -b cjl/dev
 RUN cd image-plane-correction && pip install .
 RUN mkdir -p /root/.casa/data
 RUN echo measurespath=/root/.casa/data > ~/.casa/data/config.py
+RUN python -c "import cv2; print(cv2.cuda.getCudaEnabledDeviceCount())"
