@@ -1,0 +1,42 @@
+FROM nvcr.io/nvidia/pytorch:23.07-py3
+WORKDIR /workspace
+RUN pip install scikit-image astropy jupyter matplotlib casatools casatasks numpy scipy
+RUN git clone https://github.com/opencv/opencv.git
+RUN cd opencv && git checkout 4.10.0 && cd ..
+RUN git clone https://github.com/opencv/opencv_contrib.git
+RUN cd opencv_contrib && git checkout 4.10.0 && cd ..
+RUN cd opencv && mkdir build && cd build && cmake -D OPENCV_EXTRA_MODULES_PATH=/workspace/opencv_contrib/modules \
+  -D CMAKE_INSTALL_PREFIX=/usr/local \
+  -D CUDA_ARCH_BIN=8.6 \
+  -D WITH_CUDA=ON \
+  -D CMAKE_BUILD_TYPE=RELEASE \
+  -D WITH_OPENGL=ON \
+  -D WITH_NVCUVID=OFF \
+  -D WITH_NVCUVENC=OFF \
+  -D WITH_CUBLAS=1 \
+  -D BUILD_opencv_python3=ON \
+  -D ENABLE_FAST_MATH=1 \
+  -D WITH_CUBLAS=1 \
+  -D WITH_TBB=1 \
+  -D WITH_CUDNN=1 \
+  -D OPENCV_DNN_CUDA=1 \
+  -D CUDA_FAST_MATH=1 \
+  -D INSTALL_C_EXAMPLES=OFF \
+  -D INSTALL_PYTHON_EXAMPLES=ON \
+  -D BUILD_EXAMPLES=ON \
+  -D PYTHON_VERSION=310 \
+  -D PYTHON3_EXECUTABLE=$(which python3) \
+  -D PYTHON_INCLUDE_DIR=$(python3 -c "from sysconfig import get_path; print(get_path('include'))") \
+  -D PYTHON_INCLUDE_DIR2=$(python3 -c "from os.path import dirname; from sysconfig import get_config_h_filename; print(dirname(get_config_h_filename()))") \
+  -D PYTHON_LIBRARY=$(python3 -c "from sysconfig import get_config_var;from os.path import dirname,join ; print(join(dirname(get_config_var('LIBPC')),get_config_var('LDLIBRARY')))") \
+  -D PYTHON3_NUMPY_INCLUDE_DIRS=$(python3 -c "import numpy; print(numpy.get_include())") \
+  -D PYTHON3_PACKAGES_PATH=$(python3 -c "from sysconfig import get_path; print(get_path('platlib'))") \
+  ..
+RUN cd opencv/build && make -j5
+RUN cd opencv/build && make install
+RUN cd opencv/build && ldconfig
+RUN git clone https://github.com/ovro-lwa/image-plane-correction.git
+RUN cd image-plane-correction && pip install .
+RUN mkdir -p /root/.casa/data
+RUN echo measurespath=/root/.casa/data > ~/.casa/data/config.py
+RUN python -c "import cv2; print(cv2.cuda.getCudaEnabledDeviceCount())"
