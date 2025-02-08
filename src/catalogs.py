@@ -81,7 +81,7 @@ def theoretical_sky(
 # Returns the coordinates of sources in the reference catalog with at least the minimum flux (in mJy)
 # The default value is 270 mJy since the NVSS catalog was observed at 1.4 GHz, the LWA testing images
 # were taken at ~60 MHz with a lower-bound of ~2.7 Jy, and we assume a spectral index of -0.7.
-def reference_sources_nvss(min_flux=270) -> Tuple[SkyCoord, Array]:
+def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = NVSS_CATALOG
     nvss = pd.read_csv(path, sep=r"\s+")
@@ -113,7 +113,7 @@ def reference_sources_nvss(min_flux=270) -> Tuple[SkyCoord, Array]:
 
 # min_flux should be in terms of mJy, but for some reason the VLSSR intensity
 # seems to be in terms of 0.1 mJys.
-def reference_sources_vlssr(min_flux=10) -> Tuple[SkyCoord, Array]:
+def reference_sources_vlssr(min_flux=10, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = VLSSR_CATALOG
     vlssr = pd.read_csv(path, sep=" ")
