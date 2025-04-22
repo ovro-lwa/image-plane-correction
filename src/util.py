@@ -111,9 +111,11 @@ def gaussian_filter(
 
 
 def rescale_quantile(image, a, b):
+    qa = jnp.quantile(image, a)
+    qb = jnp.quantile(image, b)
     return jnp.clip(
-        (image - jnp.quantile(image, a))
-        / (jnp.quantile(image, b) - jnp.quantile(image, a)),
+        (image - qa)
+        / (qb - qa),
         0,
         1,
     )

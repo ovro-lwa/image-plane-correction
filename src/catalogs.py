@@ -4,6 +4,7 @@ from typing import Literal, Tuple, Union
 
 import astropy.units as u
 import astropy.wcs as wcs
+from astropy.wcs.utils import pixel_to_skycoord
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
@@ -54,16 +55,34 @@ def theoretical_sky(
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
 
     # filter out NaNs, e.g. sources not in the field of view
-    fluxes = fluxes[~jnp.isnan(positions_xy).any(axis=1)]
-    positions_xy = positions_xy[~jnp.isnan(positions_xy).any(axis=1)]
+    ignore_positions = jnp.isnan(positions_xy).any(axis=1)
+    fluxes = fluxes[~ignore_positions]
+    positions_xy = positions_xy[~ignore_positions]
 
+    # clip maximum flux (since PSF * large flux tends to overwhelm the image)
     fluxes = jnp.clip(fluxes, 0, max_flux)
 
-    # quantize pixel positions to indices
-    xy = jnp.rint(positions_xy).astype(jnp.int32)
+    # compute beam function (flux falling off towards edge of image)
+    zenith = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs)
+    beam_function = jnp.cos(zenith.separation(positions[~ignore_positions]).rad) ** 2.0
 
+    # compute sub-pixel area for each source, assuming samples to be located
+    # at the center of each pixel
+    half_rounded = jnp.rint(positions_xy + 0.5) - 0.5
+    ab = half_rounded - positions_xy + 0.5
+
+    # we compute the area dedicated to the bottom left, bottom right, top left,
+    # and top right pixels associated with a square centered at a fractional coordinate
     theoretical = jnp.zeros((img_size, img_size))
-    theoretical = theoretical.at[xy[:, 1], xy[:, 0]].set(fluxes)
+    for xy, area in [
+        (jnp.trunc(positions_xy), ab[:, 0] * ab[:, 1]),
+        (jnp.trunc(positions_xy) + jnp.array([1, 0]), (1 - ab[:, 0]) * ab[:, 1]),
+        (jnp.trunc(positions_xy) + jnp.array([0, 1]), ab[:, 0] * (1 - ab[:, 1])),
+        (jnp.trunc(positions_xy) + jnp.array([1, 1]), (1 - ab[:, 0]) * (1 - ab[:, 1])),
+    ]:
+        # adding up flux as delta functions to each pixel area
+        idxs = jnp.rint(xy).astype(jnp.int32)
+        theoretical = theoretical.at[idxs[:, 1], idxs[:, 0]].add(fluxes * beam_function * area)
 
     if perturb is not None:
         theoretical = perturb.apply(theoretical)
@@ -71,6 +90,7 @@ def theoretical_sky(
     # taper off PSF using a gaussian
     psf_kernel = gkern(img_size, img_size / 8) * psf
 
+    # Convolve point sources with PSF to generate theoretical sky.
     # using FFT as its much faster than a direct 4096x4096 by 4096x4096 convolution
     convolved = convolve(theoretical, psf_kernel, mode="same", method="fft")
 

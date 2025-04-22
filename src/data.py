@@ -53,3 +53,20 @@ def data_freq(n):
         f"/fastpool/zwhuang/data_freq/alldata.briggs0.tukey30.10channels.v2-{n:04d}-psf.fits"
     )
     return image, psf, imwcs
+
+    
+def data_nivedata(n, get_header=False):
+    assert 0 <= n <= 30
+    k = 8 + n // 6
+    l = n % 6
+    image, imwcs = fits_image(
+        f"/fastpool/zwhuang/data_nivedita/{k:02d}/46_niter1000_taper30_briggs0-t{l:04d}-I-image.fits"
+    )
+    data = fits.open(f"/fastpool/zwhuang/data_nivedita/{k:02d}/46_niter1000_taper30_briggs0-t{l:04d}-I-image.fits")
+    psf, _ = fits_image(
+        f"/fastpool/zwhuang/data_nivedita/{k:02d}/46_niter1000_taper30_briggs0-t{l:04d}-psf.fits"
+    )
+    if get_header:
+        return image, psf, imwcs, data[0].header
+    else:
+        return image, psf, imwcs
