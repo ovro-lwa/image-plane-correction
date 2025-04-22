@@ -21,14 +21,14 @@ VLSSR_CATALOG = "/fastpool/zwhuang/catalogs/vlssr_radecpeak.txt"
 Catalog = Union[Literal["NVSS"], Literal["VLSSR"]]
 
 
-def reference_sources(catalog: Catalog, min_flux=0) -> Tuple[SkyCoord, Array]:
+def reference_sources(catalog: Catalog, min_flux=0, path=None) -> Tuple[SkyCoord, Array]:
     """
     Returns the true-sky positions/fluxes associated with reference sources from the NVSS or VLSSR catalogs.
     """
     if catalog == "NVSS":
-        return reference_sources_nvss(min_flux)
+        return reference_sources_nvss(min_flux, path=path)
     elif catalog == "VLSSR":
-        return reference_sources_vlssr(min_flux)
+        return reference_sources_vlssr(min_flux, path=path)
     else:
         raise NotImplementedError(f"Unknown catalog: {catalog}")
 
@@ -43,6 +43,7 @@ def theoretical_sky(
     img_size=4096,
     min_flux=0,
     max_flux=35,
+    path=None
 ):
     """
     Constructs a theoretical view of the sky using reference sources from a catalog.
@@ -50,7 +51,7 @@ def theoretical_sky(
     A maximum flux is set in order to prevent extremely bright sources from overwhelming the rest of the image.
     If desired, a flow field can be provided that perturbs the point sources before the convolution with the PSF.
     """
-    positions, fluxes = reference_sources(catalog, min_flux=min_flux)
+    positions, fluxes = reference_sources(catalog, min_flux=min_flux, path=path)
 
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
 
@@ -100,8 +101,10 @@ def theoretical_sky(
 # Returns the coordinates of sources in the reference catalog with at least the minimum flux (in mJy)
 # The default value is 270 mJy since the NVSS catalog was observed at 1.4 GHz, the LWA testing images
 # were taken at ~60 MHz with a lower-bound of ~2.7 Jy, and we assume a spectral index of -0.7.
-def reference_sources_nvss(min_flux=270) -> Tuple[SkyCoord, Array]:
-    nvss = pd.read_csv(NVSS_CATALOG, sep=r"\s+")
+def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
+    if path is None:
+        path = NVSS_CATALOG
+    nvss = pd.read_csv(path, sep=r"\s+")
     sorted_nvss = nvss.sort_values(by=["f"])
 
     # cut off refernce sources below a certain flux density
@@ -130,8 +133,10 @@ def reference_sources_nvss(min_flux=270) -> Tuple[SkyCoord, Array]:
 
 # min_flux should be in terms of mJy, but for some reason the VLSSR intensity
 # seems to be in terms of 0.1 mJys.
-def reference_sources_vlssr(min_flux=10) -> Tuple[SkyCoord, Array]:
-    vlssr = pd.read_csv(VLSSR_CATALOG, sep=" ")
+def reference_sources_vlssr(min_flux=10, path=None) -> Tuple[SkyCoord, Array]:
+    if path is None:
+        path = VLSSR_CATALOG
+    vlssr = pd.read_csv(path, sep=" ")
     sorted_vlssr = vlssr.sort_values(by="PEAK INT")
     sorted_vlssr = sorted_vlssr[sorted_vlssr["PEAK INT"] >= min_flux * 10]
 
