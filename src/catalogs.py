@@ -60,6 +60,10 @@ def theoretical_sky(
     fluxes = fluxes[~ignore_positions]
     positions_xy = positions_xy[~ignore_positions]
 
+    # scale pixel values to right location (if input imwcs is for larger image than img_size)
+    scale = img_size / imwcs.pixel_shape[0]
+    positions_xy = positions_xy * scale
+
     # clip maximum flux (since PSF * large flux tends to overwhelm the image)
     fluxes = jnp.clip(fluxes, 0, max_flux)
 
@@ -84,12 +88,14 @@ def theoretical_sky(
         # adding up flux as delta functions to each pixel area
         idxs = jnp.rint(xy).astype(jnp.int32)
         theoretical = theoretical.at[idxs[:, 1], idxs[:, 0]].add(fluxes * beam_function * area)
+    # idxs = jnp.rint(positions_xy).astype(jnp.int32)
+    # theoretical = theoretical.at[idxs[:, 1], idxs[:, 0]].set(fluxes * beam_function)
 
     if perturb is not None:
         theoretical = perturb.apply(theoretical)
 
     # taper off PSF using a gaussian
-    psf_kernel = gkern(img_size, img_size / 8) * psf
+    psf_kernel = gkern(psf.shape[0], psf.shape[0] / 4) * psf
 
     # Convolve point sources with PSF to generate theoretical sky.
     # using FFT as its much faster than a direct 4096x4096 by 4096x4096 convolution

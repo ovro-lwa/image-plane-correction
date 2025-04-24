@@ -3,113 +3,161 @@
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 
 def indices(m, n):
     return jnp.indices((m, n)).transpose(1, 2, 0)
 
+def horizon_mask(N=4096, r=0.85):
+    idxs = indices(N, N) - N/2
+    return jnp.sqrt(idxs[:, :, 0]**2.0 + idxs[:, :, 1]**2.0) < N * r * 0.5
 
-# https://github.com/google/jax/pull/15359
-def _gaussian_kernel1d(sigma: float, order: int, radius: int) -> Array:
+# https://github.com/jax-ml/jax/pull/26011/files
+import functools
+from scipy.ndimage import _ni_support
+def _gaussian(x, sigma):
+    return jnp.exp(-0.5 / sigma ** 2 * x ** 2) / jnp.sqrt(2 * jnp.pi * sigma ** 2)
+
+def _grad_order(func, order):
+    """Compute higher order grads recursively"""
+    if order == 0:
+      return func
+
+    return jax.grad(_grad_order(func, order - 1))
+
+
+def _gaussian_kernel1d(sigma, order, radius):
+    """Computes a 1-D Gaussian convolution kernel"""
     if order < 0:
-        raise ValueError("order must be non-negative")
-    exponent_range = jnp.arange(order + 1)
-    sigma2 = sigma * sigma
-    x = jnp.arange(-radius, radius + 1)
-    phi_x = jnp.exp(-0.5 / sigma2 * x**2)
-    phi_x = phi_x / phi_x.sum()
+        raise ValueError(f'Order must be non-negative, got {order}')
+
+    x = jnp.arange(-radius, radius + 1, dtype=jnp.float32)
+    func = _grad_order(functools.partial(_gaussian, sigma=sigma), order)
+    kernel = jax.vmap(func)(x)
 
     if order == 0:
-        return phi_x
-    else:
-        # f(x) = q(x) * phi(x) = q(x) * exp(p(x))
-        # f'(x) = (q'(x) + q(x) * p'(x)) * phi(x)
-        # p'(x) = -1 / sigma ** 2
-        # Implement q'(x) + q(x) * p'(x) as a matrix operator and apply to the
-        # coefficients of q(x)
-        q = jnp.zeros(order + 1)
-        q = q.at[0].set(1)
-        D = jnp.diag(exponent_range[1:], 1)  # D @ q(x) = q'(x)
-        P = jnp.diag(jnp.ones(order) / -sigma2, -1)  # P @ q(x) = q(x) * p'(x)
-        Q_deriv = D + P
-        for _ in range(order):
-            q = Q_deriv.dot(q)
-        q = (x[:, None] ** exponent_range).dot(q)
-        return q * phi_x
+       return kernel / jnp.sum(kernel)
 
+    return kernel
 
 def gaussian_filter1d(
-    input: Array,
-    sigma: float,
-    axis=-1,
-    order=0,
-    truncate=4.0,
-    *,
-    radius: int = 0,
-    mode: str = "constant",
-    cval: float = 0.0,
-    precision=None,
-) -> Array:
-    sd = float(sigma)
-    # make the radius of the filter equal to truncate standard deviations
-    lw = int(truncate * sd + 0.5)
+      input: ArrayLike,
+      sigma: float,
+      axis: int = -1,
+      order: int = 0,
+      mode: str = 'reflect',
+      cval: float = 0.0,
+      truncate: float = 4.0,
+      *,
+      radius: int | None = None,
+      method: str = "auto"):
+    """Compute a 1D Gaussian filter on the input array along the specified axis.
+    Args:
+        input: N-dimensional input array to filter.
+        sigma: The standard deviation of the Gaussian filter.
+        axis: The axis along which to apply the filter.
+        order: The order of the Gaussian filter.
+        mode: The mode to use for padding the input array. See :func:`jax.numpy.pad` for more details.
+        cval: The value to use for padding the input array.
+        truncate: The number of standard deviations to include in the filter.
+        radius: The radius of the filter. Overrides `truncate` if provided.
+        method: The method to use for the convolution.
+    Returns:
+        The filtered array.
+    Examples:
+        >>> from jax import numpy as jnp
+        >>> import jax
+        >>> input = jnp.arange(12.0).reshape(3, 4)
+        >>> input
+        Array([[ 0.,  1.,  2.,  3.],
+               [ 4.,  5.,  6.,  7.],
+               [ 8.,  9., 10., 11.]], dtype=float32)
+        >>> jax.scipy.ndimage.gaussian_filter1d(input, sigma=1.0, axis=0, order=0)
+       Array([[2.8350844, 3.8350847, 4.8350844, 5.8350844],
+              [4.0000005, 5.       , 6.       , 7.0000005],
+              [5.1649156, 6.1649156, 7.164916 , 8.164916 ]], dtype=float32)
+    """
+    if radius is None:
+        radius = int(truncate * sigma + 0.5)
 
-    if mode != "constant" or cval != 0.0:
-        raise NotImplementedError(
-            'Other modes than "constant" with 0. fill value are not' "supported yet."
-        )
+    if radius < 0:
+        raise ValueError(f'Radius must be non-negative, got {radius}')
 
-    if radius > 0.0:
-        lw = radius
-    if lw < 0:
-        raise ValueError("Radius must be a nonnegative integer.")
+    if sigma <= 0:
+        raise ValueError(f'Sigma must be positive, got {sigma}')
 
-    weights = _gaussian_kernel1d(sigma, order, lw)[::-1]
+    pad_width = [(0, 0)] * input.ndim
+    pad_width[axis] = (int(radius), int(radius))
 
-    # Be careful that modes in signal.convolve refer to the 'same' 'full' 'valid' modes
-    # while in gaussian_filter1d refers to the way the padding is done 'constant' 'reflect' etc.
-    # We should change the convolve backend for further features
-    return jnp.apply_along_axis(
-        jsp.signal.convolve,
-        axis,
-        input,
-        weights,
-        mode="same",
-        method="auto",
-        precision=precision,
-    )
+    pad_kwargs = {'mode': mode}
 
+    if mode == 'constant':
+       # jnp.pad errors if constant_values is provided and mode is not 'constant'
+       pad_kwargs['constant_values'] = cval
+
+    input_pad = jnp.pad(input, pad_width=pad_width, **pad_kwargs)
+
+    kernel = _gaussian_kernel1d(sigma, order=order, radius=radius)
+
+    axes = list(range(input.ndim))
+    axes.pop(axis)
+    kernel = jnp.expand_dims(kernel, axes)
+
+    # boundary handling is done by jnp.pad, so we use the fixed valid mode
+    return jax.scipy.signal.convolve(input_pad, kernel, mode="valid", method=method)
+
+from collections.abc import Sequence
 
 def gaussian_filter(
-    input: Array,
-    sigma: float,
-    order: int = 0,
-    truncate: float = 4.0,
-    *,
-    radius: int = 0,
-    mode: str = "constant",
-    cval: float = 0.0,
-    precision=None,
-) -> Array:
-    input = jnp.asarray(input)
+      input: ArrayLike,
+      sigma: float | Sequence[float],
+      order: int | Sequence[int] = 0,
+      mode: str = 'reflect',
+      cval: float | Sequence[float] = 0.0,
+      truncate: float | Sequence[float] = 4.0,
+      *,
+      radius: None | Sequence[int] = None,
+      axes: Sequence[int] = None,
+      method="auto",
+    ):
+    """Gaussian filter for N-dimensional input
+    
+     Args:
+        input: N-dimensional input array to filter.
+        sigma: The standard deviation of the Gaussian filter.
+        order: The order of the Gaussian filter.
+        mode: The mode to use for padding the input array. See :func:`jax.numpy.pad` for more details.
+        cval: The value to use for padding the input array.
+        truncate: The number of standard deviations to include in the filter.
+        radius: The radius of the filter. Overrides `truncate` if provided.
+        method: The method to use for the convolution.
+    """
+    axes = _ni_support._check_axes(axes, input.ndim)
+    num_axes = len(axes)
+    orders = _ni_support._normalize_sequence(order, num_axes)
+    sigmas = _ni_support._normalize_sequence(sigma, num_axes)
+    modes = _ni_support._normalize_sequence(mode, num_axes)
+    radii = _ni_support._normalize_sequence(radius, num_axes)
 
-    for axis in range(input.ndim):
-        input = gaussian_filter1d(
-            input,
-            sigma,
-            axis=axis,
-            order=order,
-            truncate=truncate,
-            radius=radius,
-            mode=mode,
-            precision=precision,
-            cval=cval,
-        )
+    # the loop goes over the input axes, so it is always low-dimensional and
+    # keeping a Python loop is ok
+    for idx in range(input.ndim):
+       input = gaussian_filter1d(
+          input,
+          sigmas[idx],
+          axis=idx,
+          order=orders[idx],
+          mode=modes[idx],
+          cval=cval,
+          truncate=truncate,
+          radius=radii[idx],
+          method=method,
+       )
 
     return input
 
-
+@jax.jit
 def rescale_quantile(image, a, b):
     qa = jnp.quantile(image, a)
     qb = jnp.quantile(image, b)
