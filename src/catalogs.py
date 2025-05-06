@@ -129,7 +129,9 @@ def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
         + (15 / 3600) * nvss_orig[:, 2]
     )
     nvss_dec = (
-        nvss_orig[:, 3] + (1 / 60) * nvss_orig[:, 4] + (1 / 3600) * nvss_orig[:, 5]
+        nvss_orig[:, 3]
+        + np.sign(nvss_orig[:, 3]) * (1 / 60) * nvss_orig[:, 4]
+        + np.sign(nvss_orig[:, 3]) * (1 / 3600) * nvss_orig[:, 5]
     )
 
     positions = np.stack((nvss_ra, nvss_dec), axis=-1)
