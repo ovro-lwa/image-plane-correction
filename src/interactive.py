@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from util import indices
+from flow import Flow
 
 
 def plot_image(image, name="image", title="", vmin=0, vmax=1, **kwargs):
@@ -296,3 +297,23 @@ def plot_hist_loglog(data, start=0, stop=5, step=0.1, name="loglog"):
     plt.hist(data, bins=bins, log=True)
 
     plt.show()
+
+def plot_flow(flow, scale=None, mask=None, name="flow"):
+    if isinstance(flow, jnp.ndarray):
+        flow = Flow(flow)
+    plt.close(name)
+    plt.figure(name)
+    plt.imshow(flow.to_rgb(scale=scale, mask=mask), origin="lower")
+    plt.show()
+
+def toggle_flow(flow1, flow2, scale=None, mask=None, name="flow_toggle"):
+    if isinstance(flow1, jnp.ndarray):
+        flow1 = Flow(flow1)
+    if isinstance(flow2, jnp.ndarray):
+        flow2 = Flow(flow2)
+        
+    toggle_images(
+        flow1.to_rgb(scale=scale, mask=mask),
+        flow2.to_rgb(scale=scale, mask=mask),
+        name=name,
+    )

@@ -7,6 +7,8 @@ from astropy import wcs
 from astropy.io import fits
 from jaxtyping import Array
 
+from glob import glob
+
 
 def fits_image(path: str) -> Tuple[Array, wcs.WCS]:
     """
@@ -55,7 +57,7 @@ def data_freq(n):
     return image, psf, imwcs
 
     
-def data_nivedata(n, get_header=False):
+def data_nivedita(n, get_header=False):
     assert 0 <= n <= 30
     k = 8 + n // 6
     l = n % 6
@@ -70,3 +72,19 @@ def data_nivedata(n, get_header=False):
         return image, psf, imwcs, data[0].header
     else:
         return image, psf, imwcs
+        
+def data_nikita(n, get_header=False):
+    assert 0 <= n <= 331
+    paths = sorted(glob("/fastpool/zwhuang/data_nikita/2025-01-28/09/*-dirty.fits"))
+    image, imwcs = fits_image(paths[n])
+    psf, _ = fits_image("/fastpool/zwhuang/data_nikita/2025-01-28/09/20250128_090009_41MHz_averaged-psf.fits")
+    return image, psf, imwcs
+    
+def data_pipeline(n, hour, get_header=False):
+    assert hour in [3, 4, 13]
+    base_path = f"/fastpool/zwhuang/data_nikita/2025-02-02/{str(hour).zfill(2)}"
+    paths = sorted(glob(f"{base_path}/*-dirty.fits"))
+    assert 0 <= n < len(paths)
+    image, imwcs = fits_image(paths[n])
+    psf, _ = fits_image(glob(f"{base_path}/*-psf.fits")[0])
+    return image, psf, imwcs

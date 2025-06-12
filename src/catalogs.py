@@ -15,6 +15,8 @@ from jaxtyping import Array
 from flow import Flow
 from util import gkern
 
+from functools import lru_cache
+
 NVSS_CATALOG = "/fastpool/zwhuang/catalogs/nvss_trim.dat"
 VLSSR_CATALOG = "/fastpool/zwhuang/catalogs/vlssr_radecpeak.txt"
 
@@ -141,6 +143,7 @@ def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
 
 # min_flux should be in terms of mJy, but for some reason the VLSSR intensity
 # seems to be in terms of 0.1 mJys.
+@lru_cache
 def reference_sources_vlssr(min_flux=10, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = VLSSR_CATALOG

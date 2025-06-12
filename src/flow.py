@@ -23,6 +23,19 @@ class Flow:
         self.offsets = offsets
         self.direction = direction
 
+    def __neg__(self):
+        return Flow(-self.offsets)
+        
+    def __sub__(self, other):
+        if isinstance(other, jnp.ndarray):
+            return Flow(self.offsets - other)
+        return Flow(self.offsets - other.offsets)
+        
+    def __add__(self, other):
+        if isinstance(other, jnp.ndarray):
+            return Flow(self.offsets + other)
+        return Flow(self.offsets + other.offsets)
+
     # warps an input single-channel image using bilinear interpolation
     # this function should work on any vector-valued input (e.g. 3D matrices
     # where the first two axes are x/y coordinates.
