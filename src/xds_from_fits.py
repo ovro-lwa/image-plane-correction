@@ -193,20 +193,26 @@ def _xds_direction_attrs_from_header(helpers: dict, header) -> dict:
         x = x.to("rad")
         direction["reference"]["cdelt"][i] = x.value
     direction["latpole"] = {
-        "value": header["LATPOLE"] * _deg_to_rad,
+        "value": header.get("LATPOLE", 90.0) * _deg_to_rad,
         "units": "rad",
         "type": "quantity",
     }
     direction["longpole"] = {
-        "value": header["LONPOLE"] * _deg_to_rad,
+        "value": header.get("LONPOLE", 180.0) * _deg_to_rad,
         "units": "rad",
         "type": "quantity",
     }
-    pc = np.zeros([2, 2])
+    #pc = np.zeros([2, 2])
+    #for i in (0, 1):
+    #    for j in (0, 1):
+            # dir_axes are now 0-based, but fits needs 1-based
+    #        pc[i][j] = header[f"PC{dir_axes[i]+1}_{dir_axes[j]+1}"]
+    pc = np.eye(2)          # identity by default
     for i in (0, 1):
         for j in (0, 1):
-            # dir_axes are now 0-based, but fits needs 1-based
-            pc[i][j] = header[f"PC{dir_axes[i]+1}_{dir_axes[j]+1}"]
+            key = f"PC{dir_axes[i]+1}_{dir_axes[j]+1}"
+            if key in header:
+                pc[i][j] = header[key]
     direction["pc"] = pc
     # Is there really no fits header parameter for projection_parameters?
     direction["projection_parameters"] = np.array([0.0, 0.0])
@@ -275,8 +281,8 @@ def _pointing_center_to_metadata(helpers: dict, header) -> dict:
     pc_lat = float(header[f"CRVAL{t_axes[1]}"]) * unit[1]
     pc_long = pc_long.to(u.rad).value
     pc_lat = pc_lat.to(u.rad).value
-    return {"value": np.array([pc_long, pc_lat]), "initial": True}
-
+    #return {"value": np.array([pc_long, pc_lat]), "initial": True}
+    return {"value": [float(pc_long), float(pc_lat)], "initial": True}
 
 def _user_attrs_from_header(header) -> dict:
     # header is not modified
@@ -399,7 +405,7 @@ def _fits_header_to_xds_attrs(hdulist: fits.hdu.hdulist.HDUList) -> dict:
         helpers["specsys"] = header["SPECSYS"]
     else:
         helpers["specsys"] = 'rest'
-        t_axes = helpers["t_axes"]
+    t_axes = helpers["t_axes"]
     if (t_axes > 0).all():
         dir_axes = t_axes[:]
         dir_axes = dir_axes - 1
@@ -412,6 +418,7 @@ def _fits_header_to_xds_attrs(hdulist: fits.hdu.hdulist.HDUList) -> dict:
 #    if dir_axes is not None:
 #        attrs["direction"] = _xds_direction_attrs_from_header(helpers, header)
     # FIXME read fits data in chunks in case all data too large to hold in memory
+    _xds_direction_attrs_from_header(helpers, header)
     has_mask = da.any(da.isnan(primary.data)).compute()
     attrs["active_mask"] = "mask0" if has_mask else None
     helpers["has_mask"] = has_mask
@@ -431,10 +438,19 @@ def _fits_header_to_xds_attrs(hdulist: fits.hdu.hdulist.HDUList) -> dict:
     attrs["object_name"] = header["OBJECT"] if "OBJECT" in header else None
     obsdate = {}
     obsdate["type"] = "time"
-    obsdate["value"] = 59000 # Time(header["DATE-OBS"], format="isot").mjd
+    # read DATE-OBS and convert to MJD
+    date_obs = header.get("DATE-OBS")
+    if date_obs is None:
+        raise KeyError("FITS header missing DATE-OBS")
+    obsdate["value"] = Time(date_obs, format="isot", scale="utc").mjd
     obsdate["units"] = "d"
-    obsdate["scale"] = "MJD" # header["TIMESYS"]
+    obsdate["scale"] = "MJD"
     obsdate["format"] = "MJD"
+    #obsdate["type"] = "time"
+    #obsdate["value"] = 59000 # Time(header["DATE-OBS"], format="isot").mjd
+    #obsdate["units"] = "d"
+    #obsdate["scale"] = "MJD" # header["TIMESYS"]
+    #obsdate["format"] = "MJD"
     attrs["obsdate"] = obsdate
     helpers["obsdate"] = obsdate
     attrs["observer"] = "me" # header["OBSERVER"]
