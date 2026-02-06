@@ -1,15 +1,14 @@
 from typing import Literal, Union
 
-import cv2
 import jax.numpy as jnp
 import numpy as np
 from interpax import interp2d
 from jaxtyping import Array
 
 from util import hsv_to_rgb, indices
+from brox import brox_optical_flow
 
 Direction = Union[Literal["forwards"], Literal["backwards"]]
-
 
 
 # inspired by https://github.com/CSRavasio/oflibnumpy
@@ -101,6 +100,28 @@ class Flow:
     @staticmethod
     def brox(img1: Array,
              img2: Array,
+             alpha=1.0,
+             gamma = 150.0,
+             scale_factor = 0.7,
+             inner_iterations = 5,
+             outer_iterations = 150,
+             solver_iterations = 10,
+             ):
+        u_flow, v_flow = brox_optical_flow(
+            img2, img1,
+            alpha,
+            gamma,
+            scale_factor,
+            inner_iterations,
+            outer_iterations,
+            solver_iterations,
+        )
+        uv_flow = jnp.stack([u_flow, v_flow], axis=-1)
+        return Flow(uv_flow)
+
+    @staticmethod
+    def brox_opencv(img1: Array,
+             img2: Array,
              alpha=0.197,
              gamma = 50.0,
              scale_factor = 0.8,
@@ -108,6 +129,8 @@ class Flow:
              outer_iterations = 150,
              solver_iterations = 10,
              ):
+
+        import cv2
 
         denseflow = cv2.cuda.BroxOpticalFlow_create(
             alpha, gamma, scale_factor, inner_iterations, outer_iterations, solver_iterations,
