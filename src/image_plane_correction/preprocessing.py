@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from util import rescale_quantile, gaussian_filter, circular_mask
+from .util import rescale_quantile, gaussian_filter, circular_mask
 
 def normalize(image: Array):
     """

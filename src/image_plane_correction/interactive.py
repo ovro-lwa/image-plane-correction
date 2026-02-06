@@ -2,8 +2,8 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
-from util import indices
-from flow import Flow
+from .util import indices
+from .flow import Flow
 
 
 def plot_image(image, name="image", title="", vmin=0, vmax=1, **kwargs):

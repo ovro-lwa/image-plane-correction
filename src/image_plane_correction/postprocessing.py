@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 from functools import partial
 
-from util import rescale_quantile, gaussian_filter, circular_mask, indices
+from .util import rescale_quantile, gaussian_filter, circular_mask, indices
 
 def _tangent_vectors(x, origin):
     """
