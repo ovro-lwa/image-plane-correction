@@ -62,6 +62,12 @@ Homepage = "https://github.com/ovro-lwa/image-plane-correction"
 Repository = "https://github.com/ovro-lwa/image-plane-correction"
 Issues = "https://github.com/ovro-lwa/image-plane-correction/issues"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.pyright]
 include = ["src", "scripts"]
 
@@ -69,5 +75,5 @@ include = ["src", "scripts"]
 src_paths = ["src", "scripts"]
 
 [tool.ruff]
-include = ["src/*.py", "scripts/*.py"]
+include = ["src/**/*.py", "scripts/*.py"]
 extend-include = ["notebooks/*.ipynb"]

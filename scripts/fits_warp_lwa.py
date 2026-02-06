@@ -16,11 +16,8 @@ import os
 import sys
 from time import time
 
-# TODO: remove relative imports
-# from source_detection import identify_sources_bdsf
-# from catalogs import reference_sources_nvss
-from source_detection import identify_sources_bdsf
-from catalogs import reference_sources_nvss
+from image_plane_correction.source_detection import identify_sources_bdsf
+from image_plane_correction.catalogs import reference_sources_nvss
 
 
 logger = logging.getLogger(__name__)
