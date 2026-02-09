@@ -12,8 +12,8 @@ from astropy.coordinates import SkyCoord
 from jax.scipy.signal import convolve
 from jaxtyping import Array
 
-from flow import Flow
-from util import gkern
+from .flow import Flow
+from .util import gkern
 
 from functools import lru_cache
 

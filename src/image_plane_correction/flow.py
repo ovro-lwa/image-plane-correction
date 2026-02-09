@@ -5,8 +5,8 @@ import numpy as np
 from interpax import interp2d
 from jaxtyping import Array
 
-from util import hsv_to_rgb, indices
-from brox import brox_optical_flow
+from .util import hsv_to_rgb, indices
+from .brox import brox_optical_flow
 
 Direction = Union[Literal["forwards"], Literal["backwards"]]
 
