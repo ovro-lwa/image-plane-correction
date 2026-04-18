@@ -1,11 +1,12 @@
-from typing import Literal, Union
+from typing import Iterable, Literal, Union
 
 import jax.numpy as jnp
 import numpy as np
+import os
 from interpax import interp2d
 from jaxtyping import Array
 
-from .util import hsv_to_rgb, indices
+from .util import group_files_by_frequency, hsv_to_rgb, indices
 from .brox import brox_optical_flow
 
 Direction = Union[Literal["forwards"], Literal["backwards"]]
@@ -143,3 +144,198 @@ class Flow:
         flow = denseflow.calc(b, a, None).download()
         
         return Flow(jnp.array(flow))
+
+
+def calcflow(
+    image_fn,
+    psf_fn=None,
+    reference_sky=None,
+    qa=True,
+    write=False,
+    outroot=None,
+    catalog="VLSSR",
+    max_flux=20,
+    catalog_path="/home/claw/vlssr_radecpeak.txt",
+    preprocess_weight=1.5,
+    alpha=1.3,
+    gamma=150,
+    scale_factor=0.7,
+):
+    """
+    Compute optical flow and dewarp an image using a theoretical sky model.
+    """
+    from astropy.io import fits
+
+    from . import data
+    from .catalogs import theoretical_sky
+    from .preprocessing import preprocess
+    from .util import runqa
+
+    print(f"Processing {os.path.basename(image_fn)}")
+    assert psf_fn is not None or reference_sky is not None, (
+        "Must provide PSF file or reference sky image"
+    )
+
+    image, imwcs = data.fits_image(image_fn)
+    if psf_fn is not None:
+        psf, _ = data.fits_image(psf_fn)
+
+    if reference_sky is None:
+        reference_sky = theoretical_sky(
+            imwcs, psf, catalog=catalog, max_flux=max_flux, path=catalog_path
+        )
+
+    image_processed, sky_processed = preprocess(
+        image, reference_sky, weight=preprocess_weight
+    )
+    flow = Flow.brox(
+        image_processed,
+        sky_processed,
+        alpha=alpha,
+        gamma=gamma,
+        scale_factor=scale_factor,
+    )
+    dewarped = flow.apply(image)
+
+    if qa:
+        score = runqa(image, reference_sky, flow, dewarped)
+    else:
+        score = 1
+
+    if write:
+        if outroot is None:
+            raise ValueError("`outroot` must be provided when write=True")
+        if qa and score == 1:
+            outname = os.path.join(
+                outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
+            )
+            dewarped_arr = np.array(dewarped)
+            fits.writeto(outname, dewarped_arr, imwcs.to_header())
+        else:
+            print(f"image {image_fn} failed qa. Not writing dewarped image.")
+
+    return image, reference_sky, flow, dewarped
+
+
+def flow_cascade73MHz(
+    image_filenames: Iterable[str],
+    qa=True,
+    write=False,
+    outroot=None,
+    catalog="VLSSR",
+    max_flux=20,
+    catalog_path="/home/claw/vlssr_radecpeak.txt",
+    preprocess_weight=1.5,
+    alpha=1.3,
+    gamma=150,
+    scale_factor=0.7,
+):
+    """
+    Run a 73MHz-seeded frequency cascade over a list of image filenames.
+
+    The cascade follows the notebook logic:
+    1) Solve flow at 73MHz using the PSF-derived theoretical sky.
+    2) Iterate upward in frequency using previous reference sky.
+    3) Iterate downward in frequency using previous reference sky.
+
+    Input expectations
+    ------------------
+    - `image_filenames` contains image-file paths ending with ``-image.fits``.
+    - Each image has a matching PSF path via ``-image.fits -> -psf.fits``.
+    - For each 73MHz seed filename, string replacement
+      ``"73MHz" -> f"{freq}MHz"`` yields existing peer image files across all
+      subbands present in `image_filenames`.
+
+    Returns
+    -------
+    dict[int, list[np.ndarray]]
+        Mapping of frequency MHz to a list of flow offset arrays for each 73MHz seed file.
+    """
+    groups = group_files_by_frequency(image_filenames)
+    freqs = sorted(groups.keys())
+    if 73 not in groups:
+        raise AssertionError("No 73MHz files found in input group.")
+    if not groups[73]:
+        raise AssertionError("73MHz group is empty.")
+
+    lookup = {freq: set(paths) for freq, paths in groups.items()}
+    offsets = {freq: [] for freq in freqs}
+    i73 = freqs.index(73)
+
+    for fn in groups[73]:
+        if "73MHz" not in fn:
+            raise AssertionError(f"Expected '73MHz' token in path: {fn}")
+        if not fn.endswith("-image.fits"):
+            raise AssertionError(f"Expected '-image.fits' suffix in path: {fn}")
+
+        fn_psf = fn.replace("-image.fits", "-psf.fits")
+        if fn_psf == fn:
+            raise AssertionError(f"PSF replacement failed for path: {fn}")
+        if "-psf.fits" not in fn_psf:
+            raise AssertionError(
+                f"Expected matching PSF path via '-image.fits' -> '-psf.fits' for: {fn}"
+            )
+
+        image, reference_sky73, flow, dewarped = calcflow(
+            fn,
+            psf_fn=fn_psf,
+            qa=qa,
+            write=write,
+            outroot=outroot,
+            catalog=catalog,
+            max_flux=max_flux,
+            catalog_path=catalog_path,
+            preprocess_weight=preprocess_weight,
+            alpha=alpha,
+            gamma=gamma,
+            scale_factor=scale_factor,
+        )
+        offsets[73].append(np.nan_to_num(flow.offsets))
+
+        reference_sky = reference_sky73
+        for freq in freqs[i73 + 1 :]:
+            fn_next = fn.replace("73MHz", f"{freq}MHz")
+            if fn_next == fn or fn_next not in lookup[freq]:
+                raise AssertionError(
+                    f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
+                )
+            image, reference_sky, flow, dewarped = calcflow(
+                fn_next,
+                reference_sky=reference_sky,
+                qa=qa,
+                write=write,
+                outroot=outroot,
+                catalog=catalog,
+                max_flux=max_flux,
+                catalog_path=catalog_path,
+                preprocess_weight=preprocess_weight,
+                alpha=alpha,
+                gamma=gamma,
+                scale_factor=scale_factor,
+            )
+            offsets[freq].append(np.nan_to_num(flow.offsets))
+
+        reference_sky = reference_sky73
+        for freq in reversed(freqs[:i73]):
+            fn_next = fn.replace("73MHz", f"{freq}MHz")
+            if fn_next == fn or fn_next not in lookup[freq]:
+                raise AssertionError(
+                    f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
+                )
+            image, reference_sky, flow, dewarped = calcflow(
+                fn_next,
+                reference_sky=reference_sky,
+                qa=qa,
+                write=write,
+                outroot=outroot,
+                catalog=catalog,
+                max_flux=max_flux,
+                catalog_path=catalog_path,
+                preprocess_weight=preprocess_weight,
+                alpha=alpha,
+                gamma=gamma,
+                scale_factor=scale_factor,
+            )
+            offsets[freq].append(np.nan_to_num(flow.offsets))
+
+    return offsets

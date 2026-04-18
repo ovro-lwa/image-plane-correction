@@ -1,8 +1,14 @@
 """Utility functions (mostly ported from other libraries to JAX)"""
 
+import os
+import re
+from collections.abc import Iterable, Sequence
+from typing import Dict, List
+
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+import numpy as np
 from jaxtyping import Array, ArrayLike
 
 
@@ -106,8 +112,6 @@ def gaussian_filter1d(
 
     # boundary handling is done by jnp.pad, so we use the fixed valid mode
     return jax.scipy.signal.convolve(input_pad, kernel, mode="valid", method=method)
-
-from collections.abc import Sequence
 
 def gaussian_filter(
       input: ArrayLike,
@@ -599,3 +603,52 @@ viridis_b = jnp.array([x[2] for x in _viridis_data])
 def viridis(image):
     idxs = jnp.rint(image * 256).astype(jnp.uint32)
     return jnp.stack([viridis_r[idxs], viridis_g[idxs], viridis_b[idxs]], axis=-1)
+
+
+_MHZ = re.compile(r"(\d+)MHz")
+
+
+def runqa(image, reference_sky, flow, dewarped):
+    """
+    Run QA checks on a dewarped image and return pass/fail as 1/0.
+    """
+    offsets = np.nan_to_num(flow.offsets)
+    if not offsets.any():
+        print("Warning: All offsets zero")
+
+    shift_mag = np.linalg.norm(offsets, axis=2)
+    shift_mean = np.mean(shift_mag)
+    shift_5, shift_median, shift_95 = np.percentile(shift_mag, [5, 50, 95])
+    print(
+        f"Shift magnitude mean {shift_mean:.1f} pix "
+        f"(5, 50, 95 percentiles: {shift_5:.1f}, {shift_median:.1f}, {shift_95:.1f} pix)"
+    )
+
+    score = 1
+    if reference_sky is not None:
+        pcts = [5, 32, 50, 68, 95]
+        residuals = np.abs(np.percentile(dewarped - reference_sky, pcts)) - np.abs(
+            np.percentile(image - reference_sky, pcts)
+        )
+        if not all(residuals < 0):
+            print(
+                "Not all residuals improved. "
+                f"(Percentile, residual difference): {list(zip(pcts, residuals.tolist()))}"
+            )
+            score = 0
+    return score
+
+
+def group_files_by_frequency(paths: Iterable[str]) -> Dict[int, List[str]]:
+    """
+    Group file paths by tuning frequency (integer MHz) parsed from each basename.
+    """
+    out: Dict[int, List[str]] = {}
+    for path in paths:
+        base = os.path.basename(path)
+        m = _MHZ.search(base)
+        if m is None:
+            raise ValueError(f"no MHz token in basename: {path!r}")
+        freq = int(m.group(1))
+        out.setdefault(freq, []).append(path)
+    return out
