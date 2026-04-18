@@ -3,6 +3,7 @@
 from typing import Literal, Tuple, Union
 
 import jax.numpy as jnp
+import numpy as np
 from astropy import wcs
 from astropy.io import fits
 from jaxtyping import Array
@@ -15,7 +16,11 @@ def fits_image(path: str) -> Tuple[Array, wcs.WCS]:
     Reads a fits image at a given path, returning the contained image and wcs data.
     """
     image = fits.open(path)
-    image_data = jnp.array(image[0].data.squeeze())
+    # JAX expects native-endian arrays; FITS data can be big-endian (e.g. '>f4').
+    image_np = np.asarray(image[0].data.squeeze())
+    if image_np.dtype.byteorder in (">", "!"):
+        image_np = image_np.byteswap().view(image_np.dtype.newbyteorder("="))
+    image_data = jnp.array(image_np)
     imwcs = wcs.WCS(image[0].header, naxis=2)
     image.close()
     return image_data, imwcs
