@@ -150,6 +150,7 @@ def calcflow(
     image_fn,
     psf_fn=None,
     reference_sky=None,
+    reference_sky_fn=None,
     cleaned=False,
     qa=True,
     write=False,
@@ -163,7 +164,8 @@ def calcflow(
     scale_factor=0.7,
 ):
     """
-    Compute optical flow and dewarp an image using a theoretical sky model.
+    Compute optical flow and dewarp an image using a theoretical sky model,
+    or a precomputed ``reference_sky`` (array or separate FITS via ``reference_sky_fn``).
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
@@ -173,12 +175,44 @@ def calcflow(
     from .preprocessing import preprocess
     from .util import runqa
 
+    def _sanitize_finite_jax(arr, label: str):
+        finite_mask = jnp.isfinite(arr)
+        if bool(jnp.all(finite_mask)):
+            return arr
+        finite_pixels = np.asarray(arr)[np.isfinite(np.asarray(arr))]
+        fill_value = float(np.median(finite_pixels)) if finite_pixels.size else 0.0
+        out = jnp.array(
+            np.nan_to_num(
+                np.asarray(arr),
+                nan=fill_value,
+                posinf=fill_value,
+                neginf=fill_value,
+            )
+        )
+        n_bad = int(arr.size - finite_pixels.size)
+        print(
+            f"Sanitized {n_bad} non-finite pixels in {label} "
+            f"using fill value {fill_value:.6g}"
+        )
+        return out
+
     print(f"Processing {os.path.basename(image_fn)}")
-    assert psf_fn is not None or reference_sky is not None, (
-        "Must provide PSF file or reference sky image"
-    )
+    if reference_sky is not None and reference_sky_fn is not None:
+        raise ValueError("Provide only one of `reference_sky` or `reference_sky_fn`.")
+    assert (
+        psf_fn is not None
+        or reference_sky is not None
+        or reference_sky_fn is not None
+    ), "Must provide PSF file, `reference_sky`, or `reference_sky_fn`"
 
     image, imwcs = data.fits_image(image_fn)
+    image = _sanitize_finite_jax(image, os.path.basename(image_fn))
+
+    if reference_sky_fn is not None:
+        reference_sky, _ = data.fits_image(reference_sky_fn)
+        reference_sky = _sanitize_finite_jax(
+            reference_sky, os.path.basename(reference_sky_fn)
+        )
 
     def _cleaned_psf_from_header(psf_path, shape):
         header = fits.getheader(psf_path)
@@ -225,6 +259,14 @@ def calcflow(
     if reference_sky is None:
         reference_sky = theoretical_sky(
             imwcs, psf, catalog=catalog, max_flux=max_flux, path=catalog_path
+        )
+    else:
+        reference_sky = _sanitize_finite_jax(reference_sky, "reference_sky")
+
+    if np.asarray(image).shape != np.asarray(reference_sky).shape:
+        raise ValueError(
+            "image and reference_sky must have the same shape: "
+            f"{np.asarray(image).shape} vs {np.asarray(reference_sky).shape}"
         )
 
     image_processed, sky_processed = preprocess(

@@ -27,7 +27,8 @@ def horizon_mask(image: Array, r = 0.7, sigma=30.0):
     to reduce detrimental effects on the optical flow model.
     """
     # use FFT-based convolution for better performance
-    mask = gaussian_filter(circular_mask(r=r), sigma=sigma, method="fft")
+    n = int(image.shape[0])
+    mask = gaussian_filter(circular_mask(N=n, r=r), sigma=sigma, method="fft")
     return image * mask
 
 
