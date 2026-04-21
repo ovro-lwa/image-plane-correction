@@ -150,6 +150,7 @@ def calcflow(
     image_fn,
     psf_fn=None,
     reference_sky=None,
+    cleaned=False,
     qa=True,
     write=False,
     outroot=None,
@@ -165,6 +166,7 @@ def calcflow(
     Compute optical flow and dewarp an image using a theoretical sky model.
     """
     from astropy.io import fits
+    from astropy.wcs.utils import proj_plane_pixel_scales
 
     from . import data
     from .catalogs import theoretical_sky
@@ -177,8 +179,48 @@ def calcflow(
     )
 
     image, imwcs = data.fits_image(image_fn)
+
+    def _cleaned_psf_from_header(psf_path, shape):
+        header = fits.getheader(psf_path)
+        if "BMAJ" not in header or "BMIN" not in header:
+            raise KeyError(
+                f"Expected BMAJ/BMIN in PSF FITS header for cleaned mode: {psf_path}"
+            )
+
+        bmaj_deg = float(header["BMAJ"])
+        bmin_deg = float(header["BMIN"])
+        if bmaj_deg <= 0 or bmin_deg <= 0:
+            raise ValueError(
+                f"BMAJ/BMIN must be positive in PSF FITS header for cleaned mode: {psf_path}"
+            )
+
+        # FITS beam sizes are FWHM in degrees; convert to pixel-space sigma.
+        pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
+        if pixel_scales.shape[0] < 2:
+            raise ValueError(f"Could not derive 2D pixel scales from WCS for: {image_fn}")
+        sigma_y = (bmaj_deg / pixel_scales[1]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        sigma_x = (bmin_deg / pixel_scales[0]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+
+        h, w = shape
+        yy, xx = np.indices((h, w), dtype=np.float64)
+        cy = (h - 1) / 2.0
+        cx = (w - 1) / 2.0
+        gaussian = np.exp(
+            -0.5 * (((yy - cy) / sigma_y) ** 2 + ((xx - cx) / sigma_x) ** 2)
+        )
+        peak = gaussian.max()
+        if peak <= 0:
+            raise ValueError(f"Generated cleaned PSF has non-positive peak for: {psf_path}")
+        gaussian = gaussian / peak
+        return jnp.array(gaussian)
+
     if psf_fn is not None:
-        psf, _ = data.fits_image(psf_fn)
+        if cleaned:
+            with fits.open(psf_fn, memmap=True) as hdul:
+                psf_shape = hdul[0].data.squeeze().shape
+            psf = _cleaned_psf_from_header(psf_fn, psf_shape)
+        else:
+            psf, _ = data.fits_image(psf_fn)
 
     if reference_sky is None:
         reference_sky = theoretical_sky(
@@ -219,6 +261,7 @@ def calcflow(
 
 def flow_cascade73MHz(
     image_filenames: Iterable[str],
+    cleaned=False,
     qa=True,
     write=False,
     outroot=None,
@@ -279,6 +322,7 @@ def flow_cascade73MHz(
         image, reference_sky73, flow, dewarped = calcflow(
             fn,
             psf_fn=fn_psf,
+            cleaned=cleaned,
             qa=qa,
             write=write,
             outroot=outroot,
