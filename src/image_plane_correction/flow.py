@@ -162,6 +162,8 @@ def calcflow(
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
+    bright_source_flux_qa=False,
+    bright_source_flux_qa_count=10,
 ):
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
@@ -173,7 +175,7 @@ def calcflow(
     from . import data
     from .catalogs import theoretical_sky
     from .preprocessing import preprocess
-    from .util import runqa
+    from .util import log_bright_source_flux_comparison, runqa
 
     def _sanitize_finite_jax(arr, label: str):
         finite_mask = jnp.isfinite(arr)
@@ -200,10 +202,11 @@ def calcflow(
     if reference_sky is not None and reference_sky_fn is not None:
         raise ValueError("Provide only one of `reference_sky` or `reference_sky_fn`.")
     assert (
-        psf_fn is not None
+        cleaned
+        or psf_fn is not None
         or reference_sky is not None
         or reference_sky_fn is not None
-    ), "Must provide PSF file, `reference_sky`, or `reference_sky_fn`"
+    ), "Must provide cleaned=True, PSF file, `reference_sky`, or `reference_sky_fn`"
 
     image, imwcs = data.fits_image(image_fn)
     image = _sanitize_finite_jax(image, os.path.basename(image_fn))
@@ -214,18 +217,18 @@ def calcflow(
             reference_sky, os.path.basename(reference_sky_fn)
         )
 
-    def _cleaned_psf_from_header(psf_path, shape):
-        header = fits.getheader(psf_path)
+    def _cleaned_psf_from_header(header_path, shape):
+        header = fits.getheader(header_path)
         if "BMAJ" not in header or "BMIN" not in header:
             raise KeyError(
-                f"Expected BMAJ/BMIN in PSF FITS header for cleaned mode: {psf_path}"
+                f"Expected BMAJ/BMIN in FITS header for cleaned mode: {header_path}"
             )
 
         bmaj_deg = float(header["BMAJ"])
         bmin_deg = float(header["BMIN"])
         if bmaj_deg <= 0 or bmin_deg <= 0:
             raise ValueError(
-                f"BMAJ/BMIN must be positive in PSF FITS header for cleaned mode: {psf_path}"
+                f"BMAJ/BMIN must be positive in FITS header for cleaned mode: {header_path}"
             )
 
         # FITS beam sizes are FWHM in degrees; convert to pixel-space sigma.
@@ -244,17 +247,40 @@ def calcflow(
         )
         peak = gaussian.max()
         if peak <= 0:
-            raise ValueError(f"Generated cleaned PSF has non-positive peak for: {psf_path}")
+            raise ValueError(
+                f"Generated cleaned PSF has non-positive peak for: {header_path}"
+            )
         gaussian = gaussian / peak
         return jnp.array(gaussian)
 
-    if psf_fn is not None:
-        if cleaned:
+    if cleaned:
+        # Cleaned images use beam metadata from FITS headers and do not require
+        # deriving/reading a matching PSF image by filename.
+        if psf_fn is not None:
             with fits.open(psf_fn, memmap=True) as hdul:
                 psf_shape = hdul[0].data.squeeze().shape
-            psf = _cleaned_psf_from_header(psf_fn, psf_shape)
+            header_path = psf_fn
         else:
-            psf, _ = data.fits_image(psf_fn)
+            # Build a compact synthetic PSF kernel from beam sizes in the image header.
+            header = fits.getheader(image_fn)
+            if "BMAJ" not in header or "BMIN" not in header:
+                raise KeyError(
+                    f"Expected BMAJ/BMIN in image header for cleaned mode: {image_fn}"
+                )
+            pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
+            sigma_y = (float(header["BMAJ"]) / pixel_scales[1]) / (
+                2.0 * np.sqrt(2.0 * np.log(2.0))
+            )
+            sigma_x = (float(header["BMIN"]) / pixel_scales[0]) / (
+                2.0 * np.sqrt(2.0 * np.log(2.0))
+            )
+            radius = int(np.ceil(4.0 * max(sigma_x, sigma_y)))
+            size = max(9, 2 * radius + 1)
+            psf_shape = (size, size)
+            header_path = image_fn
+        psf = _cleaned_psf_from_header(header_path, psf_shape)
+    elif psf_fn is not None:
+        psf, _ = data.fits_image(psf_fn)
 
     if reference_sky is None:
         reference_sky = theoretical_sky(
@@ -282,7 +308,27 @@ def calcflow(
     dewarped = flow.apply(image)
 
     if qa:
-        score = runqa(image, reference_sky, flow, dewarped)
+        bright_source_kwargs = None
+        if bright_source_flux_qa:
+            beam_header = fits.getheader(image_fn)
+            bright_source_kwargs = {
+                "imwcs": imwcs,
+                "catalog": catalog,
+                "catalog_path": catalog_path,
+                "n_sources": bright_source_flux_qa_count,
+                "bmaj_deg": float(beam_header["BMAJ"]) if "BMAJ" in beam_header else None,
+                "bmin_deg": float(beam_header["BMIN"]) if "BMIN" in beam_header else None,
+            }
+        score = runqa(
+            image,
+            reference_sky,
+            flow,
+            dewarped,
+            bright_source_flux_qa_fn=log_bright_source_flux_comparison
+            if bright_source_flux_qa
+            else None,
+            bright_source_flux_qa_kwargs=bright_source_kwargs,
+        )
     else:
         score = 1
 
@@ -303,6 +349,7 @@ def calcflow(
 
 def flow_cascade73MHz(
     image_filenames: Iterable[str],
+    psf_filenames: Iterable[str] | None = None,
     cleaned=False,
     qa=True,
     write=False,
@@ -314,6 +361,8 @@ def flow_cascade73MHz(
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
+    bright_source_flux_qa=False,
+    bright_source_flux_qa_count=10,
 ):
     """
     Run a 73MHz-seeded frequency cascade over a list of image filenames.
@@ -336,6 +385,7 @@ def flow_cascade73MHz(
     dict[int, list[np.ndarray]]
         Mapping of frequency MHz to a list of flow offset arrays for each 73MHz seed file.
     """
+    image_filenames = list(image_filenames)
     groups = group_files_by_frequency(image_filenames)
     freqs = sorted(groups.keys())
     if 73 not in groups:
@@ -344,22 +394,28 @@ def flow_cascade73MHz(
         raise AssertionError("73MHz group is empty.")
 
     lookup = {freq: set(paths) for freq, paths in groups.items()}
+    psf_by_image = {}
+    if not cleaned:
+        if psf_filenames is None:
+            raise ValueError(
+                "For dirty images, `psf_filenames` must be provided and matched to `image_filenames`."
+            )
+        psf_filenames = list(psf_filenames)
+        if len(psf_filenames) != len(image_filenames):
+            raise ValueError(
+                "`psf_filenames` must have same length/order as `image_filenames`."
+            )
+        psf_by_image = dict(zip(image_filenames, psf_filenames))
     offsets = {freq: [] for freq in freqs}
     i73 = freqs.index(73)
 
     for fn in groups[73]:
         if "73MHz" not in fn:
             raise AssertionError(f"Expected '73MHz' token in path: {fn}")
-        if not fn.endswith("-image.fits"):
-            raise AssertionError(f"Expected '-image.fits' suffix in path: {fn}")
 
-        fn_psf = fn.replace("-image.fits", "-psf.fits")
-        if fn_psf == fn:
-            raise AssertionError(f"PSF replacement failed for path: {fn}")
-        if "-psf.fits" not in fn_psf:
-            raise AssertionError(
-                f"Expected matching PSF path via '-image.fits' -> '-psf.fits' for: {fn}"
-            )
+        fn_psf = None if cleaned else psf_by_image.get(fn)
+        if not cleaned and fn_psf is None:
+            raise ValueError(f"No matching PSF provided for image: {fn}")
 
         image, reference_sky73, flow, dewarped = calcflow(
             fn,
@@ -375,6 +431,8 @@ def flow_cascade73MHz(
             alpha=alpha,
             gamma=gamma,
             scale_factor=scale_factor,
+            bright_source_flux_qa=bright_source_flux_qa,
+            bright_source_flux_qa_count=bright_source_flux_qa_count,
         )
         offsets[73].append(np.nan_to_num(flow.offsets))
 
@@ -398,6 +456,8 @@ def flow_cascade73MHz(
                 alpha=alpha,
                 gamma=gamma,
                 scale_factor=scale_factor,
+                bright_source_flux_qa=bright_source_flux_qa,
+                bright_source_flux_qa_count=bright_source_flux_qa_count,
             )
             offsets[freq].append(np.nan_to_num(flow.offsets))
 
@@ -421,6 +481,8 @@ def flow_cascade73MHz(
                 alpha=alpha,
                 gamma=gamma,
                 scale_factor=scale_factor,
+                bright_source_flux_qa=bright_source_flux_qa,
+                bright_source_flux_qa_count=bright_source_flux_qa_count,
             )
             offsets[freq].append(np.nan_to_num(flow.offsets))
 
