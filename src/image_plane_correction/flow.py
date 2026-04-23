@@ -340,7 +340,10 @@ def calcflow(
                 outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
             )
             dewarped_arr = np.array(dewarped)
-            fits.writeto(outname, dewarped_arr, imwcs.to_header())
+            # Preserve full input metadata and refresh WCS-related cards.
+            output_header = fits.getheader(image_fn).copy()
+            output_header.update(imwcs.to_header())
+            fits.writeto(outname, dewarped_arr, output_header)
         else:
             print(f"image {image_fn} failed qa. Not writing dewarped image.")
 
