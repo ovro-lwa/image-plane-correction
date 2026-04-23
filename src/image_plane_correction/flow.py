@@ -283,8 +283,14 @@ def calcflow(
         psf, _ = data.fits_image(psf_fn)
 
     if reference_sky is None:
+        image_shape = np.asarray(image).shape
         reference_sky = theoretical_sky(
-            imwcs, psf, catalog=catalog, max_flux=max_flux, path=catalog_path
+            imwcs,
+            psf,
+            catalog=catalog,
+            img_size=image_shape[0],
+            max_flux=max_flux,
+            path=catalog_path,
         )
     else:
         reference_sky = _sanitize_finite_jax(reference_sky, "reference_sky")
