@@ -32,7 +32,8 @@ classifiers = [
 ]
 
 dependencies = [
-  "numpy>=2.0",
+  "numpy<2; python_version<'3.9'",
+  "numpy>=2; python_version>='3.9'",
   "pandas",
   "astropy",
   "bdsf",
