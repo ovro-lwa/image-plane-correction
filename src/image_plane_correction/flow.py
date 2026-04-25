@@ -3,6 +3,7 @@ from typing import Iterable, Literal, Union, overload
 import jax.numpy as jnp
 import numpy as np
 import os
+import logging
 from interpax import interp2d
 from jaxtyping import Array
 
@@ -10,6 +11,23 @@ from .util import group_files_by_frequency, hsv_to_rgb, indices
 from .brox import brox_optical_flow
 
 Direction = Union[Literal["forwards"], Literal["backwards"]]
+PHASE2_SUBBANDS = [
+    "18MHz",
+    "23MHz",
+    "27MHz",
+    "32MHz",
+    "36MHz",
+    "41MHz",
+    "46MHz",
+    "50MHz",
+    "55MHz",
+    "59MHz",
+    "64MHz",
+    "69MHz",
+    "73MHz",
+    "78MHz",
+    "82MHz",
+]
 
 
 # inspired by https://github.com/CSRavasio/oflibnumpy
@@ -568,21 +586,7 @@ def flow_cascade73MHz_phase2(work_dir: str, logger=None):
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
 
-    try:
-        import cfg  # type: ignore
-
-        all_subbands = list(cfg.ALL_SUBBANDS)
-    except Exception:
-        all_subbands = sorted(
-            [
-                entry
-                for entry in os.listdir(work_dir)
-                if os.path.isdir(os.path.join(work_dir, entry))
-            ]
-        )
-        logger.warning(
-            "Could not import cfg.ALL_SUBBANDS; using discovered subbands from work_dir."
-        )
+    all_subbands = list(PHASE2_SUBBANDS)
 
     image_filenames = []
     psf_by_image = {}
