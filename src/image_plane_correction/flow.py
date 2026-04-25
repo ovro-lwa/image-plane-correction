@@ -1,4 +1,4 @@
-from typing import Iterable, Literal, Union
+from typing import Iterable, Literal, Union, overload
 
 import jax.numpy as jnp
 import numpy as np
@@ -146,6 +146,7 @@ class Flow:
         return Flow(jnp.array(flow))
 
 
+@overload
 def calcflow(
     image_fn,
     psf_fn=None,
@@ -164,6 +165,52 @@ def calcflow(
     scale_factor=0.7,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
+    return_qa: Literal[True] = True,
+): ...
+
+
+@overload
+def calcflow(
+    image_fn,
+    psf_fn=None,
+    reference_sky=None,
+    reference_sky_fn=None,
+    cleaned=False,
+    qa=True,
+    write=False,
+    outroot=None,
+    catalog="VLSSR",
+    max_flux=20,
+    catalog_path="/home/claw/vlssr_radecpeak.txt",
+    preprocess_weight=1.5,
+    alpha=1.3,
+    gamma=150,
+    scale_factor=0.7,
+    bright_source_flux_qa=False,
+    bright_source_flux_qa_count=10,
+    return_qa: Literal[False] = False,
+): ...
+
+
+def calcflow(
+    image_fn,
+    psf_fn=None,
+    reference_sky=None,
+    reference_sky_fn=None,
+    cleaned=False,
+    qa=True,
+    write=False,
+    outroot=None,
+    catalog="VLSSR",
+    max_flux=20,
+    catalog_path="/home/claw/vlssr_radecpeak.txt",
+    preprocess_weight=1.5,
+    alpha=1.3,
+    gamma=150,
+    scale_factor=0.7,
+    bright_source_flux_qa=False,
+    bright_source_flux_qa_count=10,
+    return_qa=False,
 ):
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
@@ -338,10 +385,12 @@ def calcflow(
     else:
         score = 1
 
+    qa_passed = bool(score == 1)
+
     if write:
         if outroot is None:
             raise ValueError("`outroot` must be provided when write=True")
-        if qa and score == 1:
+        if (qa and qa_passed) or not qa:
             outname = os.path.join(
                 outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
             )
@@ -353,6 +402,8 @@ def calcflow(
         else:
             print(f"image {image_fn} failed qa. Not writing dewarped image.")
 
+    if return_qa:
+        return image, reference_sky, flow, dewarped, qa_passed
     return image, reference_sky, flow, dewarped
 
 
@@ -496,3 +547,149 @@ def flow_cascade73MHz(
             offsets[freq].append(np.nan_to_num(flow.offsets))
 
     return offsets
+
+
+def flow_cascade73MHz_phase2(work_dir: str, logger=None):
+    """
+    Run phase-2 73MHz-seeded cascade over subband directories.
+
+    Parameters
+    ----------
+    work_dir : str
+        Phase 2 working directory containing all subband directories.
+    logger : logging.Logger
+        Logger to use for logging. If not provided, a default logger will be used.
+    Returns
+    -------
+    dict
+        {subband: bool} indicating success/failure per subband.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+
+    try:
+        import cfg  # type: ignore
+
+        all_subbands = list(cfg.ALL_SUBBANDS)
+    except Exception:
+        all_subbands = sorted(
+            [
+                entry
+                for entry in os.listdir(work_dir)
+                if os.path.isdir(os.path.join(work_dir, entry))
+            ]
+        )
+        logger.warning(
+            "Could not import cfg.ALL_SUBBANDS; using discovered subbands from work_dir."
+        )
+
+    image_filenames = []
+    psf_by_image = {}
+    for sb in all_subbands:
+        subband_dir = os.path.join(work_dir, sb)
+        if not os.path.isdir(subband_dir):
+            continue
+        for fname in sorted(os.listdir(subband_dir)):
+            if not fname.endswith(".fits"):
+                continue
+            fn = os.path.join(subband_dir, fname)
+            if "-image.fits" not in fname:
+                continue
+            image_filenames.append(fn)
+            psf_candidate = fn.replace("-image.fits", "-psf.fits")
+            if os.path.exists(psf_candidate):
+                psf_by_image[fn] = psf_candidate
+
+    if not image_filenames:
+        logger.warning("No '*-image.fits' files found under %s", work_dir)
+        return {sb: False for sb in all_subbands}
+
+    groups = group_files_by_frequency(image_filenames)
+    freqs = sorted(groups.keys())
+    if 73 not in groups:
+        raise AssertionError("No 73MHz files found in input group.")
+    if not groups[73]:
+        raise AssertionError("73MHz group is empty.")
+
+    lookup = {freq: set(paths) for freq, paths in groups.items()}
+    i73 = freqs.index(73)
+    results = {}
+
+    def _subband_from_path(path: str) -> str:
+        return os.path.relpath(path, work_dir).split(os.sep)[0]
+
+    def _record_result(path: str, qa_ok: bool):
+        sb = _subband_from_path(path)
+        if sb in results:
+            results[sb] = bool(results[sb] and qa_ok)
+        else:
+            results[sb] = bool(qa_ok)
+
+    for fn in groups[73]:
+        if "73MHz" not in fn:
+            raise AssertionError(f"Expected '73MHz' token in path: {fn}")
+
+        fn_psf = psf_by_image.get(fn)
+        cleaned = fn_psf is None
+        _, reference_sky73, _, _, qa_ok = calcflow(
+            fn,
+            psf_fn=fn_psf,
+            cleaned=cleaned,
+            qa=True,
+            write=False,
+            return_qa=True,
+        )
+        _record_result(fn, qa_ok)
+
+        reference_sky = reference_sky73
+        for freq in freqs[i73 + 1 :]:
+            fn_next = fn.replace("73MHz", f"{freq}MHz")
+            if fn_next == fn or fn_next not in lookup[freq]:
+                logger.warning(
+                    "Filename replacement did not map to a valid %sMHz peer: %s",
+                    freq,
+                    fn_next,
+                )
+                continue
+            _, reference_sky, _, _, qa_ok = calcflow(
+                fn_next,
+                reference_sky=reference_sky,
+                qa=True,
+                write=False,
+                return_qa=True,
+            )
+            _record_result(fn_next, qa_ok)
+
+        reference_sky = reference_sky73
+        for freq in reversed(freqs[:i73]):
+            fn_next = fn.replace("73MHz", f"{freq}MHz")
+            if fn_next == fn or fn_next not in lookup[freq]:
+                logger.warning(
+                    "Filename replacement did not map to a valid %sMHz peer: %s",
+                    freq,
+                    fn_next,
+                )
+                continue
+            _, reference_sky, _, _, qa_ok = calcflow(
+                fn_next,
+                reference_sky=reference_sky,
+                qa=True,
+                write=False,
+                return_qa=True,
+            )
+            _record_result(fn_next, qa_ok)
+
+    n_ok = sum(1 for v in results.values() if v)
+    n_fail = sum(1 for v in results.values() if not v)
+    n_missing = len(all_subbands) - len(results)
+    successful_subbands = [sb for sb, ok in results.items() if ok]
+    logger.info(
+        "Phase2 cascade QA summary n_ok=%s n_fail=%s n_missing=%s",
+        n_ok,
+        n_fail,
+        n_missing,
+    )
+    logger.debug("Phase2 successful_subbands=%s", successful_subbands)
+
+    return {sb: bool(results.get(sb, False)) for sb in all_subbands}
