@@ -71,7 +71,7 @@ def theoretical_sky(
 
     # compute beam function (flux falling off towards edge of image)
     zenith = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs)
-    beam_function = jnp.cos(zenith.separation(positions[~ignore_positions]).rad) ** 2.0
+    beam_function = jnp.cos(zenith.separation(positions[~ignore_positions]).rad) ** 1.6
 
     # compute sub-pixel area for each source, assuming samples to be located
     # at the center of each pixel
