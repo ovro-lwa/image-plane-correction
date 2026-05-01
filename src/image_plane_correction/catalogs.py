@@ -1,6 +1,5 @@
 """Functions for loading true-sky radio sources from various catalogs"""
 
-import importlib
 from typing import Any, Callable, Literal, Tuple, Union
 
 import astropy.units as u
@@ -152,17 +151,24 @@ def theoretical_sky_beam_function(
     beam_function: Union[Callable, None] = None,
     obs_date=None,
     freq_hz=None,
-    use_pb_correct: bool = False,
+    use_best_pb_model: bool = False,
+    use_pb_correct: Union[bool, None] = None,
 ):
     """
     Constructs theoretical sky with a configurable beam response map.
 
     Beam options:
       - ``beam_function`` callable that accepts (ra_map, dec_map) and returns a (h, w) response map.
-      - ``use_pb_correct=True`` to import ``pb_correct._get_beam()``, then call
+      - ``use_best_pb_model=True`` to verify pb_correct dependencies via
+        ``from pb_correct import BeamModel, BEAM_PATH``, then import ``_get_beam()``
+        and call
         ``beam.get_response(ra_flat, dec_flat, obs_date, freq_hz).reshape((h, w))``.
       - if neither is supplied, falls back to the legacy cos^2 zenith model.
     """
+    # Backward compatibility: legacy keyword is still accepted.
+    if use_pb_correct is not None:
+        use_best_pb_model = use_pb_correct
+
     positions, fluxes = reference_sources(catalog, min_flux=min_flux, path=path)
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
 
@@ -179,8 +185,12 @@ def theoretical_sky_beam_function(
     fluxes = jnp.clip(fluxes, 0, max_flux)
 
     beam = None
-    if use_pb_correct:
-        beam = importlib.import_module("pb_correct")._get_beam()
+    if use_best_pb_model:
+        # Validate pb_correct dependency availability early.
+        from pb_correct import BEAM_PATH, BeamModel, _get_beam
+
+        _ = (BeamModel, BEAM_PATH)
+        beam = _get_beam()
 
     response_map = _compute_beam_response_map(
         imwcs=imwcs,

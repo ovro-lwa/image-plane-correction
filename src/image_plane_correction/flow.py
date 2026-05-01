@@ -181,6 +181,7 @@ def calcflow(
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
+    use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
     return_qa: Literal[True] = True,
@@ -204,6 +205,7 @@ def calcflow(
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
+    use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
     return_qa: Literal[False] = False,
@@ -226,6 +228,7 @@ def calcflow(
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
+    use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
     return_qa=False,
@@ -233,12 +236,15 @@ def calcflow(
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
     or a precomputed ``reference_sky`` (array or separate FITS via ``reference_sky_fn``).
+
+    Set ``use_best_pb_model=True`` to use the best primary-beam response model
+    provided by ``theoretical_sky_beam_function``.
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
 
     from . import data
-    from .catalogs import theoretical_sky
+    from .catalogs import theoretical_sky_beam_function
     from .preprocessing import preprocess
     from .util import log_bright_source_flux_comparison, runqa
 
@@ -349,13 +355,14 @@ def calcflow(
 
     if reference_sky is None:
         image_shape = np.asarray(image).shape
-        reference_sky = theoretical_sky(
+        reference_sky = theoretical_sky_beam_function(
             imwcs,
             psf,
             catalog=catalog,
             img_size=image_shape[0],
             max_flux=max_flux,
             path=catalog_path,
+            use_best_pb_model=use_best_pb_model,
         )
     else:
         reference_sky = _sanitize_finite_jax(reference_sky, "reference_sky")
@@ -439,6 +446,7 @@ def flow_cascade73MHz(
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
+    use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
 ):
@@ -509,6 +517,7 @@ def flow_cascade73MHz(
             alpha=alpha,
             gamma=gamma,
             scale_factor=scale_factor,
+            use_best_pb_model=use_best_pb_model,
             bright_source_flux_qa=bright_source_flux_qa,
             bright_source_flux_qa_count=bright_source_flux_qa_count,
         )
@@ -534,6 +543,7 @@ def flow_cascade73MHz(
                 alpha=alpha,
                 gamma=gamma,
                 scale_factor=scale_factor,
+                use_best_pb_model=use_best_pb_model,
                 bright_source_flux_qa=bright_source_flux_qa,
                 bright_source_flux_qa_count=bright_source_flux_qa_count,
             )
@@ -559,6 +569,7 @@ def flow_cascade73MHz(
                 alpha=alpha,
                 gamma=gamma,
                 scale_factor=scale_factor,
+                use_best_pb_model=use_best_pb_model,
                 bright_source_flux_qa=bright_source_flux_qa,
                 bright_source_flux_qa_count=bright_source_flux_qa_count,
             )
