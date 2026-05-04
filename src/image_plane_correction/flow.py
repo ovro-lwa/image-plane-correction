@@ -164,6 +164,49 @@ class Flow:
         return Flow(jnp.array(flow))
 
 
+def _obs_date_isot_and_freq_hz_from_header(header):
+    """
+    Parse observation time as ISOT and frequency in Hz from a FITS header.
+
+    Time: ``DATE-OBS`` (FITS/ISO), else ``MJD-OBS``. Frequency: ``RESTFRQ`` /
+    ``RESTFREQ`` (Hz), else the ``FREQ`` WCS axis ``CRVAL`` with ``CUNIT``.
+    """
+    from astropy import units as u
+    from astropy.time import Time
+
+    obs_date_isot = None
+    if "DATE-OBS" in header:
+        v = header["DATE-OBS"]
+        try:
+            t = Time(v, format="fits", scale="utc")
+        except ValueError:
+            t = Time(v, scale="utc")
+        obs_date_isot = t.isot
+    elif "MJD-OBS" in header:
+        obs_date_isot = Time(header["MJD-OBS"], format="mjd", scale="utc").isot
+
+    freq_hz = None
+    for key in ("RESTFRQ", "RESTFREQ"):
+        if key in header:
+            freq_hz = float(header[key])
+            break
+    if freq_hz is None:
+        naxis = int(header.get("NAXIS", 0))
+        for i in range(1, naxis + 1):
+            ctype = header.get(f"CTYPE{i}", "") or ""
+            if not str(ctype).upper().startswith("FREQ"):
+                continue
+            crval = float(header[f"CRVAL{i}"])
+            cunit_raw = header.get(f"CUNIT{i}", "Hz")
+            cunit = str(cunit_raw).strip() if cunit_raw is not None else "Hz"
+            if not cunit:
+                cunit = "Hz"
+            freq_hz = (crval * u.Unit(cunit)).to(u.Hz).value
+            break
+
+    return obs_date_isot, freq_hz
+
+
 @overload
 def calcflow(
     image_fn,
@@ -238,7 +281,10 @@ def calcflow(
     or a precomputed ``reference_sky`` (array or separate FITS via ``reference_sky_fn``).
 
     Set ``use_best_pb_model=True`` to use the best primary-beam response model
-    provided by ``theoretical_sky_beam_function``.
+    provided by ``theoretical_sky_beam_function``. Observation time (ISOT) and
+    frequency (Hz) are read from the image FITS header—``DATE-OBS`` / ``MJD-OBS``
+    and ``RESTFRQ`` / ``RESTFREQ`` or a ``FREQ`` axis—and passed through so the
+    beam model matches the observation.
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
@@ -278,6 +324,15 @@ def calcflow(
         or reference_sky is not None
         or reference_sky_fn is not None
     ), "Must provide cleaned=True, PSF file, `reference_sky`, or `reference_sky_fn`"
+
+    input_header = fits.getheader(image_fn)
+    obs_date, freq_hz = _obs_date_isot_and_freq_hz_from_header(input_header)
+    if use_best_pb_model and (obs_date is None or freq_hz is None):
+        raise ValueError(
+            "use_best_pb_model requires observation time and frequency in the image header "
+            "(e.g. DATE-OBS and RESTFRQ, or a FREQ WCS axis). "
+            f"Could not parse for {image_fn!r}: obs_date={obs_date!r}, freq_hz={freq_hz!r}."
+        )
 
     image, imwcs = data.fits_image(image_fn)
     image = _sanitize_finite_jax(image, os.path.basename(image_fn))
@@ -333,7 +388,7 @@ def calcflow(
             header_path = psf_fn
         else:
             # Build a compact synthetic PSF kernel from beam sizes in the image header.
-            header = fits.getheader(image_fn)
+            header = input_header
             if "BMAJ" not in header or "BMIN" not in header:
                 raise KeyError(
                     f"Expected BMAJ/BMIN in image header for cleaned mode: {image_fn}"
@@ -363,6 +418,8 @@ def calcflow(
             max_flux=max_flux,
             path=catalog_path,
             use_best_pb_model=use_best_pb_model,
+            obs_date=obs_date,
+            freq_hz=freq_hz,
         )
     else:
         reference_sky = _sanitize_finite_jax(reference_sky, "reference_sky")
@@ -388,14 +445,13 @@ def calcflow(
     if qa:
         bright_source_kwargs = None
         if bright_source_flux_qa:
-            beam_header = fits.getheader(image_fn)
             bright_source_kwargs = {
                 "imwcs": imwcs,
                 "catalog": catalog,
                 "catalog_path": catalog_path,
                 "n_sources": bright_source_flux_qa_count,
-                "bmaj_deg": float(beam_header["BMAJ"]) if "BMAJ" in beam_header else None,
-                "bmin_deg": float(beam_header["BMIN"]) if "BMIN" in beam_header else None,
+                "bmaj_deg": float(input_header["BMAJ"]) if "BMAJ" in input_header else None,
+                "bmin_deg": float(input_header["BMIN"]) if "BMIN" in input_header else None,
             }
         score = runqa(
             image,
@@ -421,7 +477,7 @@ def calcflow(
             )
             dewarped_arr = np.array(dewarped)
             # Preserve full input metadata and refresh WCS-related cards.
-            output_header = fits.getheader(image_fn).copy()
+            output_header = input_header.copy()
             output_header.update(imwcs.to_header())
             fits.writeto(outname, dewarped_arr, output_header)
         else:
