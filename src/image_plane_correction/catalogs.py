@@ -98,6 +98,12 @@ def theoretical_sky(
 
     # taper off PSF using a gaussian
     psf_kernel = gkern(psf.shape[0], psf.shape[0] / 4) * psf
+    # Match radio image convention (Jy/beam): a point source of flux S should
+    # have a peak of ~S in the convolved image. This requires a PSF kernel with
+    # peak value 1.0; otherwise the model sky is scaled down by the kernel peak
+    # (often by the beam area in pixels).
+    peak = psf_kernel.max()
+    psf_kernel = jnp.where(peak > 0, psf_kernel / peak, psf_kernel)
 
     # Convolve point sources with PSF to generate theoretical sky.
     # using FFT as its much faster than a direct 4096x4096 by 4096x4096 convolution

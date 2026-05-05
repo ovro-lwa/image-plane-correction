@@ -165,21 +165,21 @@ def gaussian_filter(
 def rescale_quantile(image, a, b):
     qa = jnp.quantile(image, a)
     qb = jnp.quantile(image, b)
-    return jnp.clip(
-        (image - qa)
-        / (qb - qa),
-        0,
-        1,
-    )
+    denom = qb - qa
+    # If the image is (nearly) constant over the chosen quantile range, avoid
+    # division-by-zero NaNs that would otherwise poison downstream flow fields.
+    denom_safe = jnp.where(jnp.abs(denom) > 0, denom, 1.0)
+    scaled = (image - qa) / denom_safe
+    scaled = jnp.where(jnp.abs(denom) > 0, scaled, jnp.zeros_like(scaled))
+    return jnp.clip(scaled, 0, 1)
     
 @jax.jit
 def rescale_absolute(image, qa, qb):
-    return jnp.clip(
-        (image - qa)
-        / (qb - qa),
-        0,
-        1,
-    )
+    denom = qb - qa
+    denom_safe = jnp.where(jnp.abs(denom) > 0, denom, 1.0)
+    scaled = (image - qa) / denom_safe
+    scaled = jnp.where(jnp.abs(denom) > 0, scaled, jnp.zeros_like(scaled))
+    return jnp.clip(scaled, 0, 1)
 
 
 def clip_quantile(image, a, b):

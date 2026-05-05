@@ -1,4 +1,4 @@
-from typing import Iterable, Literal, Optional, Union, overload
+from typing import Iterable, Literal, Optional, Union
 
 import jax.numpy as jnp
 import numpy as np
@@ -207,7 +207,6 @@ def _obs_date_isot_and_freq_hz_from_header(header):
     return obs_date_isot, freq_hz
 
 
-@overload
 def calcflow(
     image_fn,
     psf_fn=None,
@@ -228,56 +227,6 @@ def calcflow(
     use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
-    return_qa: Literal[True] = True,
-): ...
-
-
-@overload
-def calcflow(
-    image_fn,
-    psf_fn=None,
-    reference_sky=None,
-    reference_sky_fn=None,
-    cleaned=False,
-    qa=True,
-    write=False,
-    outroot=None,
-    catalog="VLSSR",
-    max_flux=20,
-    catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
-    preprocess_weight=1.5,
-    horizon_elevation_deg: Optional[float] = None,
-    alpha=1.3,
-    gamma=150,
-    scale_factor=0.7,
-    use_best_pb_model: bool = False,
-    bright_source_flux_qa=False,
-    bright_source_flux_qa_count=10,
-    return_qa: Literal[False] = False,
-): ...
-
-
-def calcflow(
-    image_fn,
-    psf_fn=None,
-    reference_sky=None,
-    reference_sky_fn=None,
-    cleaned=False,
-    qa=True,
-    write=False,
-    outroot=None,
-    catalog="VLSSR",
-    max_flux=20,
-    catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
-    preprocess_weight=1.5,
-    horizon_elevation_deg: Optional[float] = None,
-    alpha=1.3,
-    gamma=150,
-    scale_factor=0.7,
-    use_best_pb_model: bool = False,
-    bright_source_flux_qa=False,
-    bright_source_flux_qa_count=10,
-    return_qa=False,
 ):
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
@@ -533,9 +482,7 @@ def calcflow(
         else:
             print(f"image {image_fn} failed qa. Not writing dewarped image.")
 
-    if return_qa:
-        return image, reference_sky, flow, dewarped, qa_passed
-    return image, reference_sky, flow, dewarped
+    return image, reference_sky, flow, dewarped, qa_passed
 
 
 def flow_cascade73MHz(
@@ -609,7 +556,7 @@ def flow_cascade73MHz(
         if not cleaned and fn_psf is None:
             raise ValueError(f"No matching PSF provided for image: {fn}")
 
-        image, reference_sky73, flow, dewarped = calcflow(
+        image, reference_sky73, flow, dewarped, _qa_ok = calcflow(
             fn,
             psf_fn=fn_psf,
             cleaned=cleaned,
@@ -636,7 +583,7 @@ def flow_cascade73MHz(
                 raise AssertionError(
                     f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
                 )
-            image, reference_sky, flow, dewarped = calcflow(
+            image, reference_sky, flow, dewarped, _qa_ok = calcflow(
                 fn_next,
                 reference_sky=reference_sky,
                 qa=qa,
@@ -662,7 +609,7 @@ def flow_cascade73MHz(
                 raise AssertionError(
                     f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
                 )
-            image, reference_sky, flow, dewarped = calcflow(
+            image, reference_sky, flow, dewarped, _qa_ok = calcflow(
                 fn_next,
                 reference_sky=reference_sky,
                 qa=qa,
@@ -759,7 +706,6 @@ def flow_cascade73MHz_phase2(work_dir: str, logger=None):
             cleaned=cleaned,
             qa=True,
             write=False,
-            return_qa=True,
         )
         _record_result(fn, qa_ok)
 
@@ -778,7 +724,6 @@ def flow_cascade73MHz_phase2(work_dir: str, logger=None):
                 reference_sky=reference_sky,
                 qa=True,
                 write=False,
-                return_qa=True,
             )
             _record_result(fn_next, qa_ok)
 
@@ -797,7 +742,6 @@ def flow_cascade73MHz_phase2(work_dir: str, logger=None):
                 reference_sky=reference_sky,
                 qa=True,
                 write=False,
-                return_qa=True,
             )
             _record_result(fn_next, qa_ok)
 
