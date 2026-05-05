@@ -32,14 +32,14 @@ def horizon_mask(image: Array, r = 0.7, sigma=30.0):
     return image * mask
 
 
-def preprocess(image: Array, sky: Array, weight=1.0):
+def preprocess(image: Array, sky: Array, weight=1.0, horizon_r: float = 0.7):
     """
     The standard preprocessing pipeline to match up an observed and theoretical sky.
     Output images are optimized to produce a smooth flow with signals after being
     passed into an optical flow model.
     """
     # mask out horizon RFI/artifacts
-    image, sky = horizon_mask(image), horizon_mask(sky)
+    image, sky = horizon_mask(image, r=horizon_r), horizon_mask(sky, r=horizon_r)
 
     # rescale pixel brightnesses to approximately the same level
     image, sky = normalize_high(image), normalize_high(sky)
