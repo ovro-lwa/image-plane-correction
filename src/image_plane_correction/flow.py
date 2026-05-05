@@ -220,7 +220,7 @@ def calcflow(
     max_flux=20,
     catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
     preprocess_weight=1.5,
-    horizon_elevation_deg: Optional[float] = None,
+    horizon_elevation_deg: Optional[float] = 10.0,
     alpha=1.3,
     gamma=150,
     scale_factor=0.7,
