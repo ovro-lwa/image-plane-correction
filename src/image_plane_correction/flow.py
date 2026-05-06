@@ -207,6 +207,52 @@ def _obs_date_isot_and_freq_hz_from_header(header):
     return obs_date_isot, freq_hz
 
 
+def horizon_r_normalized(
+    imwcs,
+    n: int,
+    horizon_elevation_deg: Optional[float],
+) -> float:
+    """
+    Normalized disk radius ``r`` passed to :func:`~image_plane_correction.preprocessing.preprocess`
+    as ``horizon_r`` (same convention as ``util.circular_mask``).
+
+    If ``horizon_elevation_deg`` is ``None``, returns ``0.7`` (legacy default).
+    """
+    from astropy.wcs.utils import pixel_to_skycoord
+
+    if horizon_elevation_deg is None:
+        return 0.7
+
+    z_deg = 90.0 - float(horizon_elevation_deg)
+    if not np.isfinite(z_deg):
+        raise ValueError(f"horizon_elevation_deg must be finite, got {horizon_elevation_deg!r}")
+    z_deg = float(np.clip(z_deg, 0.0, 180.0))
+
+    cx = cy = (float(n) - 1.0) / 2.0
+    c0 = pixel_to_skycoord(cx, cy, imwcs, origin=0)
+
+    rho = np.linspace(0.0, float(n) / 2.0, 2048, dtype=float)
+    xs = cx + rho
+    ys = np.full_like(xs, cy)
+    cs = pixel_to_skycoord(xs, ys, imwcs, origin=0)
+    sep_deg = cs.separation(c0).deg
+
+    finite = np.isfinite(sep_deg)
+    if not np.any(finite):
+        raise ValueError("Could not derive horizon radius from WCS (no finite separations).")
+    rho = rho[finite]
+    sep_deg = sep_deg[finite]
+
+    order = np.argsort(sep_deg)
+    sep_deg = sep_deg[order]
+    rho = rho[order]
+
+    z_deg = float(np.clip(z_deg, float(sep_deg[0]), float(sep_deg[-1])))
+    rho_z = float(np.interp(z_deg, sep_deg, rho))
+    r = (2.0 * rho_z) / float(n)
+    return float(np.clip(r, 0.0, 1.0))
+
+
 def calcflow(
     image_fn,
     psf_fn=None,
@@ -237,6 +283,10 @@ def calcflow(
     frequency (Hz) are read from the image FITS header—``DATE-OBS`` / ``MJD-OBS``
     and ``RESTFRQ`` / ``RESTFREQ`` or a ``FREQ`` axis—and passed through so the
     beam model matches the observation.
+
+    When ``cleaned=True``, ``reference_sky`` is run through the same non-finite
+    sanitization as the image after it is built or supplied (e.g. NaNs from
+    beam/WCS outside the physical sky).
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
@@ -266,48 +316,6 @@ def calcflow(
             f"using fill value {fill_value:.6g}"
         )
         return out
-
-    def _horizon_r_from_elevation_deg(imwcs, n: int, elevation_deg: float) -> float:
-        """
-        Convert a horizon elevation (degrees) into the normalized `circular_mask` radius `r`.
-
-        Assumes the image center corresponds to zenith and uses the WCS to map a radial
-        pixel offset into angular separation from the center.
-        """
-        from astropy.wcs.utils import pixel_to_skycoord
-
-        z_deg = 90.0 - float(elevation_deg)
-        if not np.isfinite(z_deg):
-            raise ValueError(f"horizon_elevation_deg must be finite, got {elevation_deg!r}")
-        z_deg = float(np.clip(z_deg, 0.0, 180.0))
-
-        cx = cy = (float(n) - 1.0) / 2.0
-        c0 = pixel_to_skycoord(cx, cy, imwcs, origin=0)
-
-        # Sample outward along +x from the center and compute angular separation.
-        # We use half the image size to match `circular_mask`'s definition (N * r * 0.5).
-        rho = np.linspace(0.0, float(n) / 2.0, 2048, dtype=float)
-        xs = cx + rho
-        ys = np.full_like(xs, cy)
-        cs = pixel_to_skycoord(xs, ys, imwcs, origin=0)
-        sep_deg = cs.separation(c0).deg
-
-        finite = np.isfinite(sep_deg)
-        if not np.any(finite):
-            raise ValueError("Could not derive horizon radius from WCS (no finite separations).")
-        rho = rho[finite]
-        sep_deg = sep_deg[finite]
-
-        # Ensure monotonic interpolation even if WCS sampling is not strictly ordered.
-        order = np.argsort(sep_deg)
-        sep_deg = sep_deg[order]
-        rho = rho[order]
-
-        # Clamp target zenith angle to sampled range.
-        z_deg = float(np.clip(z_deg, float(sep_deg[0]), float(sep_deg[-1])))
-        rho_z = float(np.interp(z_deg, sep_deg, rho))
-        r = (2.0 * rho_z) / float(n)
-        return float(np.clip(r, 0.0, 1.0))
 
     print(f"Processing {os.path.basename(image_fn)}")
     if reference_sky is not None and reference_sky_fn is not None:
@@ -418,16 +426,20 @@ def calcflow(
     else:
         reference_sky = _sanitize_finite_jax(reference_sky, "reference_sky")
 
+    if cleaned:
+        reference_sky = _sanitize_finite_jax(
+            reference_sky,
+            "reference_sky (cleaned=True)",
+        )
+
     if np.asarray(image).shape != np.asarray(reference_sky).shape:
         raise ValueError(
             "image and reference_sky must have the same shape: "
             f"{np.asarray(image).shape} vs {np.asarray(reference_sky).shape}"
         )
 
-    horizon_r = 0.7
-    if horizon_elevation_deg is not None:
-        n = int(np.asarray(image).shape[0])
-        horizon_r = _horizon_r_from_elevation_deg(imwcs, n=n, elevation_deg=horizon_elevation_deg)
+    n_img = int(np.asarray(image).shape[0])
+    horizon_r = horizon_r_normalized(imwcs, n=n_img, horizon_elevation_deg=horizon_elevation_deg)
 
     image_processed, sky_processed = preprocess(
         image, reference_sky, weight=preprocess_weight, horizon_r=horizon_r

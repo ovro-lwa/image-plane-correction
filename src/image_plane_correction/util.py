@@ -163,16 +163,17 @@ def gaussian_filter(
 
 @jax.jit
 def rescale_quantile(image, a, b):
-    qa = jnp.quantile(image, a)
-    qb = jnp.quantile(image, b)
+    qa = jnp.nanquantile(image, a)
+    qb = jnp.nanquantile(image, b)
     denom = qb - qa
     # If the image is (nearly) constant over the chosen quantile range, avoid
     # division-by-zero NaNs that would otherwise poison downstream flow fields.
     denom_safe = jnp.where(jnp.abs(denom) > 0, denom, 1.0)
     scaled = (image - qa) / denom_safe
     scaled = jnp.where(jnp.abs(denom) > 0, scaled, jnp.zeros_like(scaled))
-    return jnp.clip(scaled, 0, 1)
-    
+    scaled = jnp.clip(scaled, 0, 1)
+    return jnp.where(jnp.isfinite(scaled), scaled, jnp.zeros_like(scaled))
+
 @jax.jit
 def rescale_absolute(image, qa, qb):
     denom = qb - qa
@@ -183,7 +184,10 @@ def rescale_absolute(image, qa, qb):
 
 
 def clip_quantile(image, a, b):
-    return jnp.clip(image, jnp.quantile(image, a), jnp.quantile(image, b))
+    lo = jnp.nanquantile(image, a)
+    hi = jnp.nanquantile(image, b)
+    out = jnp.clip(image, lo, hi)
+    return jnp.where(jnp.isfinite(image), out, jnp.zeros_like(out))
 
 
 # https://stackoverflow.com/a/43346070
@@ -865,6 +869,41 @@ def log_bright_source_flux_comparison(
             print(f"  {i:>3d}  {ra_deg:10.5f} {dec_deg:9.5f} {cat_flux:9.3f} {sep:8.2f}")
 
 
+def _qa_arrays_to_numpy_f64(*arrays: ArrayLike) -> list[np.ndarray]:
+    """Concrete NumPy float64 copies for JAX / FITS inputs (percentiles need host arrays)."""
+    return [np.array(np.asarray(a), dtype=np.float64, copy=True) for a in arrays]
+
+
+def _qa_residual_difference_percentiles(
+    dewarped: np.ndarray,
+    image: np.ndarray,
+    reference_sky: np.ndarray,
+    pcts: list[float],
+) -> tuple[np.ndarray, int]:
+    """
+    Compare residual distributions on pixels where image, reference, and dewarped are finite.
+
+    Mirrors the legacy statistic ``abs(pct(d - r)) - abs(pct(i - r))`` but only over valid triples.
+    Returns ``(residuals_per_pct, n_pixels_used)``.
+    """
+    mask = (
+        np.isfinite(image)
+        & np.isfinite(reference_sky)
+        & np.isfinite(dewarped)
+    )
+    n_used = int(np.count_nonzero(mask))
+    if n_used == 0:
+        return np.full(len(pcts), np.nan), 0
+
+    diff_i = (image - reference_sky)[mask]
+    diff_d = (dewarped - reference_sky)[mask]
+    # Legacy ordering: absolute value of quantiles of the raw signed residuals.
+    pct_i = np.percentile(diff_i, pcts)
+    pct_d = np.percentile(diff_d, pcts)
+    residuals = np.abs(pct_d) - np.abs(pct_i)
+    return residuals, n_used
+
+
 def runqa(
     image,
     reference_sky,
@@ -876,13 +915,13 @@ def runqa(
     """
     Run QA checks on a dewarped image and return pass/fail as 1/0.
     """
-    offsets = np.nan_to_num(flow.offsets)
+    offsets = np.nan_to_num(np.asarray(flow.offsets))
     if not offsets.any():
         print("Warning: All offsets zero")
 
     shift_mag = np.linalg.norm(offsets, axis=2)
-    shift_mean = np.mean(shift_mag)
-    shift_5, shift_median, shift_95 = np.percentile(shift_mag, [5, 50, 95])
+    shift_mean = float(np.nanmean(shift_mag))
+    shift_5, shift_median, shift_95 = np.nanpercentile(shift_mag, [5, 50, 95])
     print(
         f"Shift magnitude mean {shift_mean:.1f} pix "
         f"(5, 50, 95 percentiles: {shift_5:.1f}, {shift_median:.1f}, {shift_95:.1f} pix)"
@@ -891,13 +930,25 @@ def runqa(
     score = 1
     if reference_sky is not None:
         pcts = [5, 32, 50, 68, 95]
-        residuals = np.abs(np.percentile(dewarped - reference_sky, pcts)) - np.abs(
-            np.percentile(image - reference_sky, pcts)
-        )
-        if not all(residuals < 0):
+        dew, img, ref = _qa_arrays_to_numpy_f64(dewarped, image, reference_sky)
+        residuals, n_qa_pixels = _qa_residual_difference_percentiles(dew, img, ref, pcts)
+        if n_qa_pixels == 0:
+            print(
+                "QA residual statistics skipped: no pixels where image, reference_sky, "
+                "and dewarped are all finite; failing QA."
+            )
+            score = 0
+        elif not np.all(np.isfinite(residuals)):
+            print(
+                "QA residual statistics undefined (percentiles non-finite); failing QA. "
+                f"n_finite_pixels={n_qa_pixels}. "
+                f"(Percentile, residual difference): {list(zip(pcts, residuals.tolist()))}"
+            )
+            score = 0
+        elif not np.all(residuals < 0):
             print(
                 "Not all residuals improved. "
-                f"(Percentile, residual difference): {list(zip(pcts, residuals.tolist()))}"
+                f"(Percentile, residual difference): {list(zip(pcts, np.asarray(residuals).tolist()))}"
             )
             score = 0
 

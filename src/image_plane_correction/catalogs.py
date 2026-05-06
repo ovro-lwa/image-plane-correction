@@ -142,7 +142,7 @@ def _compute_beam_response_map(
     # Default to the legacy cos^2 zenith-separation model.
     zenith = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs)
     all_coords = SkyCoord(np.asarray(ra_map), np.asarray(dec_map), unit=(u.deg, u.deg))
-    return jnp.cos(zenith.separation(all_coords).rad) ** 2.0
+    return jnp.cos(zenith.separation(all_coords).rad) ** 1.6
 
 
 def theoretical_sky_beam_function(
