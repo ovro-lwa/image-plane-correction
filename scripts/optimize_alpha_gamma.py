@@ -3,12 +3,20 @@
 Grid-evaluate :func:`image_plane_correction.flow.calcflow` and
 :mod:`image_plane_correction.flow_metrics` over FITS images and ``(alpha, gamma)`` pairs.
 
+Supports explicit grids or a coarse **log-space** search (optionally followed by
+bounded refinement on ``log(alpha), log(gamma)`` via SciPy ``L-BFGS-B``).
+
 Example::
 
     PYTHONPATH=src python scripts/optimize_alpha_gamma.py \\
         --images obs.fits --cleaned \\
         --alphas 1.3 --gammas 150 200 \\
         --output-json metrics.json --output-csv metrics.csv
+
+Coarse search + composite objective (see ``--w-struct`` / ``--w-qa``)::
+
+    PYTHONPATH=src python scripts/optimize_alpha_gamma.py --search \\
+        --images obs.fits --cleaned --output-json metrics.json
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+from scipy.optimize import minimize
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
@@ -35,7 +44,7 @@ from image_plane_correction.data import fits_image  # noqa: E402
 from image_plane_correction.flow import calcflow, horizon_r_normalized  # noqa: E402
 from image_plane_correction import flow_metrics  # noqa: E402
 
-SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v1"
+SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v2"
 
 
 def _load_paths_from_file(path: Path) -> list[str]:
@@ -88,6 +97,47 @@ def _attach_metrics(row: dict[str, Any], smap: dict[str, Any]) -> None:
             row[key] = v
 
 
+def composite_objective_from_row(
+    row: dict[str, Any],
+    *,
+    w_struct: float,
+    w_qa: float,
+    soft_qa: bool,
+) -> float | None:
+    """
+    Per-image composite objective: ``w_struct * structure_score + w_qa * qa_scalar``.
+
+    When QA fails and ``soft_qa`` is false, returns ``None`` (drop from median aggregate).
+    With ``soft_qa``, ``qa_scalar`` is 0 so the row still contributes structure term only.
+    """
+    if row.get("error"):
+        return None
+    raw = row.get("metrics_structure_score")
+    if raw is None:
+        return None
+    struct = float(raw)
+    if not np.isfinite(struct):
+        return None
+    qa_ok = bool(row.get("qa_passed"))
+    if not qa_ok and not soft_qa:
+        return None
+    qa_scalar = 1.0 if qa_ok else 0.0
+    return float(w_struct * struct + w_qa * qa_scalar)
+
+
+def _coarse_geom_grid(
+    alpha_min: float,
+    alpha_max: float,
+    n_alpha: int,
+    gamma_min: float,
+    gamma_max: float,
+    n_gamma: int,
+) -> list[tuple[float, float]]:
+    alphas = np.geomspace(float(alpha_min), float(alpha_max), int(n_alpha))
+    gammas = np.geomspace(float(gamma_min), float(gamma_max), int(n_gamma))
+    return [(float(a), float(g)) for a in alphas for g in gammas]
+
+
 @dataclass
 class ImageSpec:
     image: str
@@ -137,11 +187,36 @@ def _parse_specs(args: argparse.Namespace) -> list[ImageSpec]:
     return out_specs
 
 
-def _alpha_gamma_grid(args: argparse.Namespace) -> list[tuple[float, float]]:
+def _positive_bounds_from_grid(grid: Sequence[tuple[float, float]], *, dim: int) -> tuple[float, float]:
+    """Minimum and maximum along ``dim`` for refinement; expand degenerate intervals slightly."""
+    vals = sorted({float(g[dim]) for g in grid})
+    lo, hi = float(vals[0]), float(vals[-1])
+    if lo <= 0 or hi <= 0:
+        raise ValueError("alpha and gamma must be positive for log-space refinement.")
+    if hi <= lo or np.isclose(lo, hi):
+        lo = lo * 0.9
+        hi = hi * 1.1
+        if lo <= 0:
+            lo = float(vals[0]) * 0.99
+    return lo, hi
+
+
+def _resolve_parameter_grid(args: argparse.Namespace) -> list[tuple[float, float]]:
+    if getattr(args, "search", False):
+        return _coarse_geom_grid(
+            args.alpha_min,
+            args.alpha_max,
+            args.alpha_steps,
+            args.gamma_min,
+            args.gamma_max,
+            args.gamma_steps,
+        )
     alphas = _parse_float_csv(args.alphas) if args.alphas else []
     gammas = _parse_float_csv(args.gammas) if args.gammas else []
     if not alphas or not gammas:
-        raise SystemExit("Provide non-empty --alphas and --gammas (comma-separated floats).")
+        raise SystemExit(
+            "Provide non-empty --alphas and --gammas (comma-separated floats), or pass --search."
+        )
     return [(a, g) for a in alphas for g in gammas]
 
 
@@ -163,6 +238,10 @@ def evaluate_one(
     bright_source_flux_qa_count: int,
     qa: bool,
     quiet: bool,
+    w_struct: float = 1.0,
+    w_qa: float = 1.0,
+    soft_qa: bool = False,
+    phase: str = "grid",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "image": spec.image,
@@ -172,6 +251,7 @@ def evaluate_one(
         "gamma": gamma,
         "cleaned": cleaned,
         "error": None,
+        "phase": phase,
     }
 
     kwargs = dict(
@@ -223,12 +303,32 @@ def evaluate_one(
         row["qa_passed"] = bool(qa_passed)
         row["horizon_r"] = float(horizon_r)
         row["calcflow_stdout"] = buf.getvalue() if quiet else ""
+        row["composite_objective"] = composite_objective_from_row(
+            row, w_struct=w_struct, w_qa=w_qa, soft_qa=soft_qa
+        )
     except Exception as exc:
         row["error"] = f"{type(exc).__name__}: {exc}"
         row["qa_passed"] = False
         row["runqa_score"] = 0
+        row["composite_objective"] = None
 
     return row
+
+
+def _rows_for_aggregate(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefer ``refine_best`` over ``grid`` when the same image was evaluated at the same (alpha, gamma)."""
+    phase_rank = {"refine_best": 2, "grid": 1}
+    best: dict[tuple[str, float, float], dict[str, Any]] = {}
+    for r in rows:
+        if r.get("error"):
+            continue
+        ke = (str(r["image"]), float(r["alpha"]), float(r["gamma"]))
+        ph = str(r.get("phase", "grid"))
+        pr = phase_rank.get(ph, 1)
+        old = best.get(ke)
+        if old is None or pr > phase_rank.get(str(old.get("phase", "grid")), 1):
+            best[ke] = r
+    return list(best.values())
 
 
 def _aggregate(
@@ -238,7 +338,13 @@ def _aggregate(
     rng: np.random.Generator,
     min_qa_rate: float,
 ) -> dict[str, Any]:
-    """Summarize by (alpha, gamma): medians, QA rate, bootstrap CI on median structure_score."""
+    """
+    Summarize by (alpha, gamma): structure metrics, composite objective, QA rate.
+
+    ``recommended`` maximizes median composite objective when any pair has finite
+    composites; otherwise falls back to median ``structure_score`` only.
+    Tie-break: higher QA pass rate, then lower median in-band curl/div ratio.
+    """
     pairs: dict[tuple[float, float], list[dict[str, Any]]] = {}
     for r in rows:
         if r.get("error"):
@@ -250,12 +356,40 @@ def _aggregate(
     for (a, g), grp in sorted(pairs.items()):
         scores = np.array([float(x["metrics_structure_score"]) for x in grp], dtype=np.float64)
         qa_hits = np.array([int(x.get("runqa_score", 0)) for x in grp], dtype=np.int64)
-        rec = {
+        comps = []
+        curls = []
+        for x in grp:
+            co = x.get("composite_objective")
+            if co is not None and np.isfinite(float(co)):
+                comps.append(float(co))
+            else:
+                comps.append(float("nan"))
+            cr = x.get("metrics_curl_to_div_ratio_band")
+            if cr is not None and np.isfinite(float(cr)):
+                curls.append(float(cr))
+            else:
+                curls.append(float("nan"))
+        comps_arr = np.asarray(comps, dtype=np.float64)
+        curls_arr = np.asarray(curls, dtype=np.float64)
+        med_comp = float("nan")
+        mean_comp = float("nan")
+        med_curl = float("nan")
+        if comps_arr.size:
+            if np.any(np.isfinite(comps_arr)):
+                med_comp = float(np.nanmedian(comps_arr))
+            if np.any(np.isfinite(comps_arr)):
+                mean_comp = float(np.nanmean(comps_arr[np.isfinite(comps_arr)]))
+        if curls_arr.size and np.any(np.isfinite(curls_arr)):
+            med_curl = float(np.nanmedian(curls_arr))
+        rec: dict[str, Any] = {
             "alpha": a,
             "gamma": g,
             "n_images": len(grp),
             "median_structure_score": float(np.median(scores)) if scores.size else float("nan"),
             "mean_structure_score": float(np.mean(scores)) if scores.size else float("nan"),
+            "median_composite_objective": med_comp,
+            "mean_composite_objective": mean_comp,
+            "median_curl_to_div_ratio_band": med_curl,
             "qa_pass_rate": float(np.mean(qa_hits)) if qa_hits.size else 0.0,
             "median_shift_p50": float(np.median([float(x["shift_p50"]) for x in grp]))
             if grp
@@ -275,14 +409,116 @@ def _aggregate(
         by_pair.append(rec)
 
     feasible = [x for x in by_pair if x["qa_pass_rate"] >= min_qa_rate - 1e-9]
-    ranked = sorted(
-        feasible,
-        key=lambda x: (x["median_structure_score"], x["qa_pass_rate"]),
-        reverse=True,
-    )
+    has_composite = any(np.isfinite(x["median_composite_objective"]) for x in feasible)
+
+    def rank_key(x: dict[str, Any]) -> tuple[float, float, float]:
+        if has_composite:
+            mc = x["median_composite_objective"]
+            mc_part = float(mc) if np.isfinite(mc) else float("-inf")
+        else:
+            mc_part = float(x["median_structure_score"]) if np.isfinite(x["median_structure_score"]) else float("-inf")
+        qa_part = float(x["qa_pass_rate"])
+        curl = x["median_curl_to_div_ratio_band"]
+        curl_penalty = float(curl) if np.isfinite(curl) else float("inf")
+        return (mc_part, qa_part, -curl_penalty)
+
+    ranked = sorted(feasible, key=rank_key, reverse=True)
     recommended = ranked[0] if ranked else None
 
-    return {"by_pair": by_pair, "recommended": recommended}
+    return {"by_pair": by_pair, "recommended": recommended, "ranked_by_composite": bool(has_composite)}
+
+
+def _eval_kw(args: argparse.Namespace, band_deg: tuple[float, float]) -> dict[str, Any]:
+    return {
+        "cleaned": args.cleaned,
+        "band_deg": band_deg,
+        "structure_mask": args.structure_mask,
+        "horizon_elevation_deg": args.horizon_elevation_deg,
+        "catalog": args.catalog,
+        "catalog_path": args.catalog_path,
+        "preprocess_weight": args.preprocess_weight,
+        "scale_factor": args.scale_factor,
+        "use_best_pb_model": args.use_best_pb_model,
+        "bright_source_flux_qa": args.bright_source_flux_qa,
+        "bright_source_flux_qa_count": args.bright_source_flux_qa_count,
+        "qa": args.qa,
+        "quiet": args.quiet,
+        "w_struct": float(args.w_struct),
+        "w_qa": float(args.w_qa),
+        "soft_qa": bool(args.soft_qa),
+    }
+
+
+def _median_composite_across_specs(
+    specs: list[ImageSpec],
+    alpha: float,
+    gamma: float,
+    *,
+    phase: str,
+    **eval_kw: Any,
+) -> float:
+    comps: list[float] = []
+    for spec in specs:
+        row = evaluate_one(spec, alpha, gamma, phase=phase, **eval_kw)
+        co = row.get("composite_objective")
+        if co is not None and np.isfinite(float(co)):
+            comps.append(float(co))
+        else:
+            comps.append(float("nan"))
+    return float(np.nanmedian(np.asarray(comps, dtype=np.float64)))
+
+
+def _run_refine(
+    specs: list[ImageSpec],
+    *,
+    best_alpha: float,
+    best_gamma: float,
+    alpha_bounds: tuple[float, float],
+    gamma_bounds: tuple[float, float],
+    maxiter: int,
+    eval_kw: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    amin, amax = alpha_bounds
+    gmin, gmax = gamma_bounds
+    bounds_log = [(np.log(amin), np.log(amax)), (np.log(gmin), np.log(gmax))]
+    x0 = np.clip(
+        np.log(np.asarray([best_alpha, best_gamma], dtype=np.float64)),
+        [bounds_log[0][0], bounds_log[1][0]],
+        [bounds_log[0][1], bounds_log[1][1]],
+    )
+
+    n_ev = {"n": 0}
+
+    def objective(log_xy: np.ndarray) -> float:
+        n_ev["n"] += 1
+        a = float(np.exp(log_xy[0]))
+        g = float(np.exp(log_xy[1]))
+        med = _median_composite_across_specs(specs, a, g, phase="refine", **eval_kw)
+        if not np.isfinite(med):
+            return 1e100
+        return float(-med)
+
+    res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds_log, options={"maxiter": int(maxiter)})
+    fin_a = float(np.exp(res.x[0]))
+    fin_g = float(np.exp(res.x[1]))
+    final_med = _median_composite_across_specs(specs, fin_a, fin_g, phase="refine_verify", **eval_kw)
+
+    refine_rows: list[dict[str, Any]] = []
+    for spec in specs:
+        refine_rows.append(evaluate_one(spec, fin_a, fin_g, phase="refine_best", **eval_kw))
+
+    summary: dict[str, Any] = {
+        "success": bool(res.success),
+        "message": str(res.message),
+        "nit": int(getattr(res, "nit", -1)),
+        "nfev_optimizer": int(getattr(res, "nfev", -1)),
+        "n_callback_evals": int(n_ev["n"]),
+        "final_alpha": fin_a,
+        "final_gamma": fin_g,
+        "final_median_composite_objective": final_med,
+        "scipy_fun": float(res.fun),
+    }
+    return summary, refine_rows
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -299,8 +535,52 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=None,
         help="Optional reference sky FITS per image",
     )
-    p.add_argument("--alphas", type=str, required=True, help="Comma-separated alpha values")
-    p.add_argument("--gammas", type=str, required=True, help="Comma-separated gamma values")
+    p.add_argument(
+        "--alphas",
+        type=str,
+        default=None,
+        help="Comma-separated alpha values (ignored if --search)",
+    )
+    p.add_argument(
+        "--gammas",
+        type=str,
+        default=None,
+        help="Comma-separated gamma values (ignored if --search)",
+    )
+    p.add_argument(
+        "--search",
+        action="store_true",
+        help="Coarse log-space grid over alpha/gamma (use --alpha-min/max/steps, --gamma-min/max/steps)",
+    )
+    p.add_argument("--alpha-min", type=float, default=0.1, help="Coarse search: minimum alpha")
+    p.add_argument("--alpha-max", type=float, default=10.0, help="Coarse search: maximum alpha")
+    p.add_argument("--alpha-steps", type=int, default=5, help="Coarse search: number of alpha samples (geomspace)")
+    p.add_argument("--gamma-min", type=float, default=1.0, help="Coarse search: minimum gamma")
+    p.add_argument("--gamma-max", type=float, default=1000.0, help="Coarse search: maximum gamma")
+    p.add_argument("--gamma-steps", type=int, default=5, help="Coarse search: number of gamma samples (geomspace)")
+    p.add_argument(
+        "--w-struct",
+        type=float,
+        default=1.0,
+        help="Weight on metrics.structure_score in composite objective",
+    )
+    p.add_argument(
+        "--w-qa",
+        type=float,
+        default=1.0,
+        help="Weight on QA scalar (1 pass / 0 fail) in composite objective",
+    )
+    p.add_argument(
+        "--soft-qa",
+        action="store_true",
+        help="When QA fails, still score structure term (qa scalar 0); default is hard exclude",
+    )
+    p.add_argument(
+        "--refine",
+        action="store_true",
+        help="After coarse grid, run SciPy L-BFGS-B on log(alpha),log(gamma) inside coarse bounds",
+    )
+    p.add_argument("--refine-maxiter", type=int, default=40, help="Max iterations for L-BFGS-B refinement")
     p.add_argument(
         "--band-deg-min",
         type=float,
@@ -343,53 +623,114 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     args = p.parse_args(list(argv) if argv is not None else None)
 
+    if args.search and (args.alphas or args.gammas):
+        raise SystemExit("Use either --search or explicit --alphas/--gammas, not both.")
+    if not args.search:
+        if not args.alphas or not args.gammas:
+            raise SystemExit(
+                "Provide --alphas and --gammas, or enable --search for a coarse log-space grid."
+            )
+    else:
+        if args.alpha_min <= 0 or args.alpha_max <= 0 or args.gamma_min <= 0 or args.gamma_max <= 0:
+            raise SystemExit("--alpha-min/max and --gamma-min/max must be positive for --search.")
+        if args.alpha_min >= args.alpha_max or args.gamma_min >= args.gamma_max:
+            raise SystemExit("--search requires min < max for both alpha and gamma ranges.")
+        if args.alpha_steps < 1 or args.gamma_steps < 1:
+            raise SystemExit("--alpha-steps and --gamma-steps must be >= 1.")
+
     specs = _parse_specs(args)
-    grid = _alpha_gamma_grid(args)
+    grid = _resolve_parameter_grid(args)
     band_deg = (float(args.band_deg_min), float(args.band_deg_max))
+    eval_kw = _eval_kw(args, band_deg)
 
     rng = np.random.default_rng(args.seed)
 
     rows: list[dict[str, Any]] = []
     for spec in specs:
         for alpha, gamma in grid:
-            row = evaluate_one(
-                spec,
-                alpha,
-                gamma,
-                cleaned=args.cleaned,
-                band_deg=band_deg,
-                structure_mask=args.structure_mask,
-                horizon_elevation_deg=args.horizon_elevation_deg,
-                catalog=args.catalog,
-                catalog_path=args.catalog_path,
-                preprocess_weight=args.preprocess_weight,
-                scale_factor=args.scale_factor,
-                use_best_pb_model=args.use_best_pb_model,
-                bright_source_flux_qa=args.bright_source_flux_qa,
-                bright_source_flux_qa_count=args.bright_source_flux_qa_count,
-                qa=args.qa,
-                quiet=args.quiet,
-            )
+            row = evaluate_one(spec, alpha, gamma, phase="grid", **eval_kw)
             rows.append(row)
 
     aggregate = _aggregate(
-        rows,
+        _rows_for_aggregate(rows),
         bootstrap_samples=max(0, int(args.bootstrap)),
         rng=rng,
         min_qa_rate=float(args.min_qa_rate),
     )
 
+    refinement_summary: dict[str, Any] | None = None
+    if args.refine:
+        rec = aggregate.get("recommended")
+        mc = rec.get("median_composite_objective") if rec else float("nan")
+        if rec is None:
+            print("Skipping --refine: no feasible coarse candidate.", file=sys.stderr)
+        elif not np.isfinite(float(mc)):
+            print(
+                "Skipping --refine: coarse best has non-finite median composite objective.",
+                file=sys.stderr,
+            )
+        else:
+            alpha_bounds = _positive_bounds_from_grid(grid, dim=0)
+            gamma_bounds = _positive_bounds_from_grid(grid, dim=1)
+            refinement_summary, refine_rows = _run_refine(
+                specs,
+                best_alpha=float(rec["alpha"]),
+                best_gamma=float(rec["gamma"]),
+                alpha_bounds=alpha_bounds,
+                gamma_bounds=gamma_bounds,
+                maxiter=max(1, int(args.refine_maxiter)),
+                eval_kw=eval_kw,
+            )
+            rows.extend(refine_rows)
+            aggregate = _aggregate(
+                _rows_for_aggregate(rows),
+                bootstrap_samples=max(0, int(args.bootstrap)),
+                rng=rng,
+                min_qa_rate=float(args.min_qa_rate),
+            )
+
+    if args.search:
+        grid_alphas = sorted({float(a) for a, _ in grid})
+        grid_gammas = sorted({float(g) for _, g in grid})
+        search_bounds = {
+            "alpha_min": args.alpha_min,
+            "alpha_max": args.alpha_max,
+            "alpha_steps": args.alpha_steps,
+            "gamma_min": args.gamma_min,
+            "gamma_max": args.gamma_max,
+            "gamma_steps": args.gamma_steps,
+        }
+    else:
+        grid_alphas = _parse_float_csv(args.alphas) if args.alphas else []
+        grid_gammas = _parse_float_csv(args.gammas) if args.gammas else []
+        search_bounds = {
+            "alpha_min": None,
+            "alpha_max": None,
+            "alpha_steps": None,
+            "gamma_min": None,
+            "gamma_max": None,
+            "gamma_steps": None,
+        }
+
     payload: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "params": {
-            "alphas": _parse_float_csv(args.alphas),
-            "gammas": _parse_float_csv(args.gammas),
+            "search": bool(args.search),
+            **search_bounds,
+            "alphas": grid_alphas,
+            "gammas": grid_gammas,
+            "grid_size": len(grid),
             "band_deg": list(band_deg),
             "structure_mask": args.structure_mask,
             "horizon_elevation_deg": args.horizon_elevation_deg,
             "cleaned": args.cleaned,
             "qa": args.qa,
+            "w_struct": args.w_struct,
+            "w_qa": args.w_qa,
+            "soft_qa": args.soft_qa,
+            "refine": bool(args.refine),
+            "refine_maxiter": args.refine_maxiter,
             "catalog": args.catalog,
             "catalog_path": args.catalog_path,
             "bootstrap": args.bootstrap,
@@ -398,6 +739,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         },
         "rows": rows,
         "aggregate": aggregate,
+        "refinement": refinement_summary,
     }
 
     out_json = Path(args.output_json)

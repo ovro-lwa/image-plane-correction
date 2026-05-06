@@ -278,6 +278,10 @@ def calcflow(
     Compute optical flow and dewarp an image using a theoretical sky model,
     or a precomputed ``reference_sky`` (array or separate FITS via ``reference_sky_fn``).
 
+    Brox smoothness ``alpha`` and gradient ``gamma`` default to values used historically in
+    this pipeline; dataset-specific tuning can be done with ``scripts/optimize_alpha_gamma.py``
+    (coarse log-space ``--search`` and optional ``--refine``).
+
     Set ``use_best_pb_model=True`` to use the best primary-beam response model
     provided by ``theoretical_sky_beam_function``. Observation time (ISOT) and
     frequency (Hz) are read from the image FITS header—``DATE-OBS`` / ``MJD-OBS``

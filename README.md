@@ -22,3 +22,27 @@ For the sake of development, I would also recommend adding the `-e` flag to the 
 
 For GPU acceleration, ensure that JAX is installed with [CUDA support](https://jax.readthedocs.io/en/latest/installation.html#installation).
 As mentioned previously, OpenCV must be built from source for CUDA support and should be accessible as `cv2` for the optical flow code to work properly.
+
+# Tuning optical-flow Brox parameters (alpha / gamma)
+
+Dense optical flow uses OpenCV Brox parameters ``alpha`` (smoothness) and ``gamma``
+(intensity gradient influence). Defaults in ``calcflow`` match historical usage; for a
+given instrument / sky model you can grid-search or refine them with:
+
+```bash
+PYTHONPATH=src python scripts/optimize_alpha_gamma.py --search \
+  --images path/to/image1.fits path/to/image2.fits --cleaned \
+  --output-json tuning_results.json
+```
+
+This evaluates a coarse geometric grid (defaults roughly \(10^{-1}\)–\(10^{1}\) for ``alpha``,
+\(10^{0}\)–\(10^{3}\) for ``gamma``, configurable via ``--alpha-min`` / ``--gamma-max`` / steps).
+Each run calls ``calcflow`` per image and parameter pair; runtime scales with
+``N_images × N_alpha × N_gamma`` (plus optional ``--refine`` L-BFGS-B iterations on
+``log(alpha), log(gamma)`` within the grid bounds).
+
+The JSON output (schema ``image_plane_correction.optimize_alpha_gamma.v2``) stores per-row
+metrics, ``composite_objective`` (structure score plus QA weighting), and an aggregated
+``recommended`` pair based on median composite across images (tie-break: QA pass rate,
+then lower in-band curl/div ratio). Use ``--alphas`` / ``--gammas`` for a fixed small grid
+instead of ``--search`` when you already know candidates.
