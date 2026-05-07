@@ -1,4 +1,4 @@
-from typing import Iterable, Literal, Optional, Union
+from typing import Any, Iterable, Literal, MutableMapping, Optional, Union
 
 import jax.numpy as jnp
 import numpy as np
@@ -273,6 +273,9 @@ def calcflow(
     use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
+    catalog_qc: bool = False,
+    catalog_qc_params: Optional[Any] = None,
+    quality_metrics: Optional[MutableMapping[str, Any]] = None,
 ):
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
@@ -291,6 +294,11 @@ def calcflow(
     When ``cleaned=True``, ``reference_sky`` is run through the same non-finite
     sanitization as the image after it is built or supplied (e.g. NaNs from
     beam/WCS outside the physical sky).
+
+    Set ``catalog_qc=True`` and pass a mutable mapping as ``quality_metrics`` (e.g. ``{}``)
+    to record catalog astrometry QC for raw vs dewarped images (see
+    :mod:`image_plane_correction.quality_checks`). Optional ``catalog_qc_params``
+    overrides defaults (:class:`~image_plane_correction.quality_checks.CatalogAstrometryQCParams`).
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
@@ -298,7 +306,8 @@ def calcflow(
     from . import data
     from .catalogs import theoretical_sky_beam_function
     from .preprocessing import preprocess
-    from .util import log_bright_source_flux_comparison, runqa
+    from .quality_checks import CatalogAstrometryQCParams, bright_source_qa_kwargs, catalog_astrometry_metrics_pair, log_bright_source_alignment
+    from .util import runqa
 
     def _sanitize_finite_jax(arr, label: str):
         finite_mask = jnp.isfinite(arr)
@@ -460,20 +469,19 @@ def calcflow(
     if qa:
         bright_source_kwargs = None
         if bright_source_flux_qa:
-            bright_source_kwargs = {
-                "imwcs": imwcs,
-                "catalog": catalog,
-                "catalog_path": catalog_path,
-                "n_sources": bright_source_flux_qa_count,
-                "bmaj_deg": float(input_header["BMAJ"]) if "BMAJ" in input_header else None,
-                "bmin_deg": float(input_header["BMIN"]) if "BMIN" in input_header else None,
-            }
+            bright_source_kwargs = bright_source_qa_kwargs(
+                imwcs,
+                input_header,
+                catalog=catalog,
+                catalog_path=catalog_path,
+                n_sources=bright_source_flux_qa_count,
+            )
         score = runqa(
             image,
             reference_sky,
             flow,
             dewarped,
-            bright_source_flux_qa_fn=log_bright_source_flux_comparison
+            bright_source_flux_qa_fn=log_bright_source_alignment
             if bright_source_flux_qa
             else None,
             bright_source_flux_qa_kwargs=bright_source_kwargs,
@@ -482,6 +490,26 @@ def calcflow(
         score = 1
 
     qa_passed = bool(score == 1)
+
+    if catalog_qc:
+        if quality_metrics is None:
+            raise ValueError(
+                "calcflow(..., catalog_qc=True) requires quality_metrics=<mutable dict> "
+                "to store catalog_qc_* metrics (see image_plane_correction.quality_checks)."
+            )
+        params = catalog_qc_params
+        if params is None:
+            params = CatalogAstrometryQCParams()
+        qc_row = catalog_astrometry_metrics_pair(
+            np.asarray(image),
+            np.asarray(dewarped),
+            imwcs,
+            catalog,
+            catalog_path,
+            image_fn,
+            params,
+        )
+        quality_metrics.update(qc_row)
 
     if write:
         if outroot is None:

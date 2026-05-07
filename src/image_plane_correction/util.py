@@ -653,220 +653,92 @@ def log_bright_source_flux_comparison(
         raise ValueError("dewarped must be a 2D image.")
     if n_sources <= 0:
         raise ValueError("n_sources must be positive.")
+    from . import source_detection as sd
 
-    if isinstance(catalog, str):
-        if imwcs is None:
-            raise ValueError("`imwcs` is required when `catalog` is a catalog key string.")
-        from astropy.wcs.utils import skycoord_to_pixel
-        from .catalogs import reference_sources
+    if isinstance(catalog, str) and imwcs is None:
+        raise ValueError("`imwcs` is required when `catalog` is a catalog key string.")
 
-        source_positions, source_fluxes = reference_sources(
-            catalog, min_flux=0, path=catalog_path
-        )
-        source_ra = np.asarray(source_positions.ra.deg, dtype=float)
-        source_dec = np.asarray(source_positions.dec.deg, dtype=float)
-        source_gal_b = np.asarray(source_positions.galactic.b.deg, dtype=float)
-        catalog_xy = np.stack(skycoord_to_pixel(source_positions, imwcs), axis=1)
-        catalog_fluxes = np.asarray(source_fluxes, dtype=float)
-        if imwcs.pixel_shape is None:
-            scale = 1.0
-        else:
-            scale = dewarped_np.shape[0] / imwcs.pixel_shape[0]
-        catalog_xy = catalog_xy * scale
-    else:
-        catalog_xy = np.asarray(catalog)
-        # If explicit pixel positions are passed, we do not have flux metadata.
-        catalog_fluxes = np.full(catalog_xy.shape[0], np.nan, dtype=float)
-        source_ra = np.full(catalog_xy.shape[0], np.nan, dtype=float)
-        source_dec = np.full(catalog_xy.shape[0], np.nan, dtype=float)
-        source_gal_b = np.full(catalog_xy.shape[0], np.nan, dtype=float)
-
-    if catalog_xy.ndim != 2 or catalog_xy.shape[1] != 2:
-        raise ValueError("catalog must be a catalog key string or an Nx2 position array.")
-
-    h, w = dewarped_np.shape
-    cx = catalog_xy[:, 0]
-    cy = catalog_xy[:, 1]
-    keep_catalog = (
-        np.isfinite(cx)
-        & np.isfinite(cy)
-        & (cx >= 0)
-        & (cx < w)
-        & (cy >= 0)
-        & (cy < h)
+    # 1) Prepare / filter the catalog to what's visible in this image.
+    cat = sd.load_reference_catalog(
+        catalog,
+        imwcs=imwcs,
+        catalog_path=catalog_path,
+        min_flux=0.0,
+        pointlike_axis_ratio_max=pointlike_axis_ratio_max,
+        image_shape=dewarped_np.shape,
     )
-    catalog_xy = catalog_xy[keep_catalog]
-    catalog_fluxes = catalog_fluxes[keep_catalog]
-    source_ra = source_ra[keep_catalog]
-    source_dec = source_dec[keep_catalog]
-    source_gal_b = source_gal_b[keep_catalog]
-    if catalog_xy.size == 0:
+    keep = sd.filter_catalog_to_image(cat.xy, dewarped_np.shape)
+    cat_xy = cat.xy[keep]
+    cat_flux = cat.flux[keep]
+
+    if cat_xy.size == 0:
         print("Skipping bright-source position QA: no visible catalog sources.")
         return
 
-    # Build quality mask: point-like morphology (if metadata exists).
-    quality_mask = np.ones(catalog_xy.shape[0], dtype=bool)
+    selected_catalog_xy = sd.select_top_catalog_sources(cat_xy, cat_flux, n_sources=n_sources)
 
-    if isinstance(catalog, str):
-        try:
-            import pandas as pd
-            from .catalogs import NVSS_CATALOG, VLSSR_CATALOG
-
-            resolved_path = catalog_path
-            if resolved_path is None:
-                resolved_path = NVSS_CATALOG if catalog == "NVSS" else VLSSR_CATALOG
-            if catalog == "NVSS":
-                raw = pd.read_csv(resolved_path, sep=r"\s+")
-                raw = raw.sort_values(by=["f"])
-            else:
-                raw = pd.read_csv(resolved_path, sep=" ")
-                raw = raw.sort_values(by="PEAK INT")
-
-            cols_upper = {c.upper().replace(" ", "_"): c for c in raw.columns}
-            maj_col = None
-            min_col = None
-            for candidate in ("MAJ", "MAJOR", "BMAJ", "MAJ_AX", "MAJAX"):
-                if candidate in cols_upper:
-                    maj_col = cols_upper[candidate]
-                    break
-            for candidate in ("MIN", "MINOR", "BMIN", "MIN_AX", "MINAX"):
-                if candidate in cols_upper:
-                    min_col = cols_upper[candidate]
-                    break
-
-            if (
-                maj_col is not None
-                and min_col is not None
-                and raw.shape[0] >= quality_mask.shape[0]
-            ):
-                maj = raw[maj_col].to_numpy(dtype=float)
-                min_ax = raw[min_col].to_numpy(dtype=float)
-                maj = maj[-quality_mask.shape[0] :]
-                min_ax = min_ax[-quality_mask.shape[0] :]
-                finite_axes = np.isfinite(maj) & np.isfinite(min_ax) & (maj > 0) & (min_ax > 0)
-                axis_ratio = np.full(maj.shape, np.inf, dtype=float)
-                axis_ratio[finite_axes] = maj[finite_axes] / min_ax[finite_axes]
-                quality_mask &= finite_axes & (axis_ratio <= pointlike_axis_ratio_max)
-        except Exception:
-            # Continue without point-like morphology filtering if metadata parsing fails.
-            pass
-
-    catalog_xy = catalog_xy[quality_mask]
-    catalog_fluxes = catalog_fluxes[quality_mask]
-    source_ra = source_ra[quality_mask]
-    source_dec = source_dec[quality_mask]
-    source_gal_b = source_gal_b[quality_mask]
-    if catalog_xy.size == 0:
-        print("Skipping bright-source position QA: no quality-filtered catalog sources.")
-        return
-
-    # Select brightest non-extended catalog sources deterministically.
-    if np.any(np.isfinite(catalog_fluxes)):
-        order = np.lexsort(
-            (
-                catalog_xy[:, 1],
-                catalog_xy[:, 0],
-                -np.nan_to_num(catalog_fluxes, nan=-np.inf),
-            )
-        )
-    else:
-        order = np.lexsort((catalog_xy[:, 1], catalog_xy[:, 0]))
-    take = min(n_sources, catalog_xy.shape[0])
-    selected_catalog_xy = catalog_xy[order][:take]
-    selected_catalog_fluxes = catalog_fluxes[order][:take]
-    selected_catalog_ra = source_ra[order][:take]
-    selected_catalog_dec = source_dec[order][:take]
-
-    # Select bright dewarped peaks with simple non-maximum suppression.
-    flat_idx = np.argsort(dewarped_np.ravel())[::-1]
-    selected_peaks = []
-    for idx in flat_idx:
-        y, x = np.unravel_index(idx, dewarped_np.shape)
-        if not np.isfinite(dewarped_np[y, x]):
-            continue
-        if selected_peaks:
-            peak_xy = np.asarray(selected_peaks, dtype=float)[:, :2]
-            deltas = peak_xy - np.array([x, y], dtype=float)
-            if np.any(np.linalg.norm(deltas, axis=1) < float(min_separation_px)):
-                continue
-        selected_peaks.append((float(x), float(y), float(dewarped_np[y, x])))
-        if len(selected_peaks) >= max(n_sources, selected_catalog_xy.shape[0]):
-            break
-
-    if not selected_peaks:
+    # 2) Pick a matching number of bright peaks in the dewarped image.
+    n_peaks = max(int(n_sources), int(selected_catalog_xy.shape[0]))
+    peaks_xy = sd.detect_peaks(
+        dewarped_np,
+        n_peaks=n_peaks,
+        min_separation_px=min_separation_px,
+        finite_only=True,
+    )
+    if peaks_xy.size == 0:
         print("Skipping bright-source position QA: no finite peaks found in dewarped image.")
         return
 
+    # 3) Optional centroid refinement.
     if imwcs is None or bmaj_deg is None or bmin_deg is None:
         raise ValueError(
             "imwcs, bmaj_deg, and bmin_deg are required for Gaussian-fit source matching."
         )
-    from astropy.wcs.utils import proj_plane_pixel_scales
-    from scipy.optimize import least_squares
+    refined_xy = sd.refine_centroids(
+        dewarped_np,
+        peaks_xy,
+        method="gaussian_fixed_beam",
+        imwcs=imwcs,
+        beam_fwhm_deg=(bmaj_deg, bmin_deg),
+    )
 
-    pix_scales = np.abs(proj_plane_pixel_scales(imwcs))
-    sigma_y = (float(bmaj_deg) / pix_scales[1]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-    sigma_x = (float(bmin_deg) / pix_scales[0]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    # 4) Nearest-neighbor association in pixel space (legacy behavior for logging).
+    idx_cat, dist_px = sd.match_xy_nearest(refined_xy, selected_catalog_xy)
+    # Map per-catalog entry: minimum distance from any measured peak.
+    min_dist_per_cat = np.full(selected_catalog_xy.shape[0], np.inf, dtype=float)
+    for i_meas, i_cat in enumerate(idx_cat):
+        if 0 <= i_cat < min_dist_per_cat.size:
+            min_dist_per_cat[i_cat] = min(min_dist_per_cat[i_cat], float(dist_px[i_meas]))
+
+    # RA/Dec columns for printing (when available).
+    if getattr(cat, "sky", None) is not None:
+        # Recompute sky selection aligned with selected_catalog_xy by matching back
+        # to the filtered list. This keeps printing stable without leaking loader internals.
+        # For large catalogs this is not optimal, but this is a logging function.
+        sky = cat.sky[keep]  # type: ignore[index]
+        # Pixel NN from selected_catalog_xy to filtered catalog list.
+        idx_back, _ = sd.match_xy_nearest(selected_catalog_xy, cat_xy)
+        ra_deg = np.asarray(sky.ra.deg, dtype=float)[idx_back]
+        dec_deg = np.asarray(sky.dec.deg, dtype=float)[idx_back]
+        flux_print = cat_flux[idx_back]
+    else:
+        ra_deg = np.full(selected_catalog_xy.shape[0], np.nan, dtype=float)
+        dec_deg = np.full(selected_catalog_xy.shape[0], np.nan, dtype=float)
+        flux_print = np.full(selected_catalog_xy.shape[0], np.nan, dtype=float)
+
     max_match_offset_px = 20.0
-
-    def _fit_centroid_fixed_beam(x0: float, y0: float, amp: float):
-        half = int(max(4, np.ceil(3.0 * max(sigma_x, sigma_y))))
-        ix = int(np.rint(x0))
-        iy = int(np.rint(y0))
-        y0w = max(0, iy - half)
-        y1w = min(dewarped_np.shape[0], iy + half + 1)
-        x0w = max(0, ix - half)
-        x1w = min(dewarped_np.shape[1], ix + half + 1)
-        patch = dewarped_np[y0w:y1w, x0w:x1w]
-        if patch.size == 0 or not np.all(np.isfinite(patch)):
-            return np.array([x0, y0], dtype=float)
-
-        yy, xx = np.indices(patch.shape, dtype=float)
-        xx += x0w
-        yy += y0w
-
-        def residuals(params):
-            xc, yc = params
-            model = amp * np.exp(
-                -0.5 * (((xx - xc) / sigma_x) ** 2 + ((yy - yc) / sigma_y) ** 2)
-            )
-            return (patch - model).ravel()
-
-        fit = least_squares(
-            residuals,
-            x0=np.array([x0, y0], dtype=float),
-            bounds=(
-                np.array([x0w, y0w], dtype=float),
-                np.array([x1w - 1, y1w - 1], dtype=float),
-            ),
-        )
-        return fit.x
-
     print(
         f"Bright-source position QA (catalog={selected_catalog_xy.shape[0]}, "
-        f"dewarped_peaks={len(selected_peaks)}):"
-    )
-    selected_catalog_xy_f = selected_catalog_xy.astype(float)
-    selected_peaks_arr = np.asarray(selected_peaks, dtype=float)
-    fitted_peak_xy = np.vstack(
-        [
-            _fit_centroid_fixed_beam(x, y, amp)
-            for x, y, amp in selected_peaks_arr
-        ]
+        f"dewarped_peaks={refined_xy.shape[0]}):"
     )
     print("  idx      ra_deg    dec_deg   cat_flux   sep_pix")
-    for i, (x_cat, y_cat) in enumerate(selected_catalog_xy_f):
-        deltas = fitted_peak_xy - np.array([x_cat, y_cat], dtype=float)
-        dists = np.linalg.norm(deltas, axis=1)
-        cat_flux = selected_catalog_fluxes[i]
-        ra_deg = selected_catalog_ra[i]
-        dec_deg = selected_catalog_dec[i]
-        sep = float(np.min(dists))
-        if sep > max_match_offset_px:
+    for i in range(selected_catalog_xy.shape[0]):
+        sep = float(min_dist_per_cat[i])
+        if sep > max_match_offset_px or not np.isfinite(sep):
             sep_out = "no match"
-            print(f"  {i:>3d}  {ra_deg:10.5f} {dec_deg:9.5f} {cat_flux:9.3f} {sep_out:>8}")
+            print(f"  {i:>3d}  {ra_deg[i]:10.5f} {dec_deg[i]:9.5f} {flux_print[i]:9.3f} {sep_out:>8}")
         else:
-            print(f"  {i:>3d}  {ra_deg:10.5f} {dec_deg:9.5f} {cat_flux:9.3f} {sep:8.2f}")
+            print(f"  {i:>3d}  {ra_deg[i]:10.5f} {dec_deg[i]:9.5f} {flux_print[i]:9.3f} {sep:8.2f}")
 
 
 def _qa_arrays_to_numpy_f64(*arrays: ArrayLike) -> list[np.ndarray]:

@@ -234,6 +234,7 @@ class TestOptimizeCLI(unittest.TestCase):
             self.assertIn("aggregate", data)
             self.assertIn("metrics_structure_score", data["rows"][0])
             self.assertIn("composite_objective", data["rows"][0])
+            self.assertIn("catalog_qc", data["params"])
 
     def test_search_mode_small_grid(self):
         mod = _load_opt_script()
@@ -303,6 +304,78 @@ class TestOptimizeCLI(unittest.TestCase):
             self.assertTrue(data["params"]["search"])
             self.assertEqual(data["params"]["grid_size"], 4)
             self.assertEqual(len(data["rows"]), 4)
+
+    def test_catalog_qc_enabled_with_pixel_catalog(self):
+        mod = _load_opt_script()
+
+        class FakeFlow:
+            offsets = np.zeros((16, 16, 2), dtype=np.float64)
+
+        def fake_calcflow(**kwargs):
+            img = np.zeros((16, 16), dtype=np.float64)
+            # Put a bright pixel somewhere so peak finding is non-empty.
+            img[8, 8] = 10.0
+            return img, img, FakeFlow(), img, True
+
+        def fake_fits_image(path):
+            from astropy.io import fits
+            from astropy.wcs import WCS
+
+            h = fits.Header()
+            h["NAXIS"] = 2
+            h["NAXIS1"] = 16
+            h["NAXIS2"] = 16
+            h["CTYPE1"] = "RA---TAN"
+            h["CTYPE2"] = "DEC--TAN"
+            h["CRVAL1"] = 180.0
+            h["CRVAL2"] = 45.0
+            h["CRPIX1"] = 8.0
+            h["CRPIX2"] = 8.0
+            h["CDELT1"] = -0.05
+            h["CDELT2"] = 0.05
+            h["CUNIT1"] = "deg"
+            h["CUNIT2"] = "deg"
+            return np.zeros((16, 16), dtype=np.float64), WCS(h)
+
+        # Use a pixel catalog so no external catalog files are needed.
+        pixel_catalog = np.array([[8.0, 8.0]], dtype=float)
+
+        spec = mod.ImageSpec(image="/tmp/fake.fits", psf="/tmp/fake.psf", reference_sky_fn=None)
+        with mock.patch.object(mod, "calcflow", side_effect=fake_calcflow), mock.patch.object(
+            mod, "fits_image", side_effect=fake_fits_image
+        ), mock.patch.object(mod, "horizon_r_normalized", return_value=0.7):
+            row = mod.evaluate_one(
+                spec,
+                1.3,
+                150.0,
+                cleaned=False,
+                band_deg=(20.0, 100.0),
+                structure_mask="none",
+                horizon_elevation_deg=10.0,
+                catalog=pixel_catalog,
+                catalog_path="/dev/null",
+                preprocess_weight=1.5,
+                scale_factor=0.7,
+                use_best_pb_model=False,
+                bright_source_flux_qa=False,
+                bright_source_flux_qa_count=10,
+                qa=True,
+                quiet=True,
+                w_struct=1.0,
+                w_qa=1.0,
+                soft_qa=False,
+                catalog_qc=True,
+                catalog_qc_centroid_method="centroid",
+                catalog_qc_max_sep_arcsec=300.0,
+                catalog_qc_min_matches=1,
+                catalog_qc_n_catalog_sources=1,
+                catalog_qc_n_measured_sources=1,
+            )
+
+        self.assertIsNone(row["error"])
+        self.assertIn("catalog_qc_raw_ok", row)
+        self.assertIn("catalog_qc_dewarped_ok", row)
+        self.assertIn("catalog_qc_delta_median_arcsec", row)
 
 
 if __name__ == "__main__":

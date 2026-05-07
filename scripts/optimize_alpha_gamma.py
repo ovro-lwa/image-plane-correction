@@ -17,6 +17,9 @@ Coarse search + composite objective (see ``--w-struct`` / ``--w-qa``)::
 
     PYTHONPATH=src python scripts/optimize_alpha_gamma.py --search \\
         --images obs.fits --cleaned --output-json metrics.json
+
+Optional catalog astrometry QC (raw vs dewarped) via ``--catalog-qc``; JSON schema is
+``image_plane_correction.optimize_alpha_gamma.v3``.
 """
 
 from __future__ import annotations
@@ -43,8 +46,9 @@ if str(_SRC) not in sys.path:
 from image_plane_correction.data import fits_image  # noqa: E402
 from image_plane_correction.flow import calcflow, horizon_r_normalized  # noqa: E402
 from image_plane_correction import flow_metrics  # noqa: E402
+from image_plane_correction.quality_checks import CatalogAstrometryQCParams, catalog_astrometry_metrics_pair  # noqa: E402
 
-SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v2"
+SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v3"
 
 
 def _load_paths_from_file(path: Path) -> list[str]:
@@ -241,6 +245,14 @@ def evaluate_one(
     w_struct: float = 1.0,
     w_qa: float = 1.0,
     soft_qa: bool = False,
+    catalog_qc: bool = False,
+    catalog_qc_centroid_method: str = "centroid",
+    catalog_qc_max_sep_arcsec: float = 120.0,
+    catalog_qc_min_matches: int = 5,
+    catalog_qc_n_catalog_sources: int = 50,
+    catalog_qc_n_measured_sources: int | None = None,
+    catalog_qc_bmaj_deg: float | None = None,
+    catalog_qc_bmin_deg: float | None = None,
     phase: str = "grid",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
@@ -302,6 +314,29 @@ def evaluate_one(
         row["runqa_score"] = int(1 if qa_passed else 0)
         row["qa_passed"] = bool(qa_passed)
         row["horizon_r"] = float(horizon_r)
+
+        if catalog_qc:
+            qc_params = CatalogAstrometryQCParams(
+                centroid_method=str(catalog_qc_centroid_method),
+                max_sep_arcsec=float(catalog_qc_max_sep_arcsec),
+                min_matches=int(catalog_qc_min_matches),
+                n_catalog_sources=int(catalog_qc_n_catalog_sources),
+                n_measured_sources=catalog_qc_n_measured_sources,
+                bmaj_deg=catalog_qc_bmaj_deg,
+                bmin_deg=catalog_qc_bmin_deg,
+            )
+            row.update(
+                catalog_astrometry_metrics_pair(
+                    np.asarray(_image),
+                    np.asarray(_dewarped),
+                    imwcs,
+                    catalog,
+                    catalog_path,
+                    spec.image,
+                    qc_params,
+                )
+            )
+
         row["calcflow_stdout"] = buf.getvalue() if quiet else ""
         row["composite_objective"] = composite_objective_from_row(
             row, w_struct=w_struct, w_qa=w_qa, soft_qa=soft_qa
@@ -311,6 +346,7 @@ def evaluate_one(
         row["qa_passed"] = False
         row["runqa_score"] = 0
         row["composite_objective"] = None
+        row["catalog_qc_delta_median_arcsec"] = None
 
     return row
 
@@ -446,6 +482,14 @@ def _eval_kw(args: argparse.Namespace, band_deg: tuple[float, float]) -> dict[st
         "w_struct": float(args.w_struct),
         "w_qa": float(args.w_qa),
         "soft_qa": bool(args.soft_qa),
+        "catalog_qc": bool(args.catalog_qc),
+        "catalog_qc_centroid_method": str(args.catalog_qc_centroid_method),
+        "catalog_qc_max_sep_arcsec": float(args.catalog_qc_max_sep_arcsec),
+        "catalog_qc_min_matches": int(args.catalog_qc_min_matches),
+        "catalog_qc_n_catalog_sources": int(args.catalog_qc_n_catalog_sources),
+        "catalog_qc_n_measured_sources": args.catalog_qc_n_measured_sources,
+        "catalog_qc_bmaj_deg": args.catalog_qc_bmaj_deg,
+        "catalog_qc_bmin_deg": args.catalog_qc_bmin_deg,
     }
 
 
@@ -610,6 +654,51 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--qa", action="store_true", default=True)
     p.add_argument("--no-qa", action="store_false", dest="qa", help="Disable residual QA inside calcflow")
     p.add_argument("--quiet", action="store_true", help="Suppress calcflow/processing stdout")
+    p.add_argument(
+        "--catalog-qc",
+        action="store_true",
+        help="Compute catalog-based astrometry QC metrics (raw + dewarped) per evaluation",
+    )
+    p.add_argument(
+        "--catalog-qc-centroid-method",
+        choices=("none", "centroid", "gaussian_fixed_beam"),
+        default="centroid",
+        help="Centroid refinement method for catalog QC (default: centroid, beam-free)",
+    )
+    p.add_argument(
+        "--catalog-qc-max-sep-arcsec",
+        type=float,
+        default=120.0,
+        help="Max angular separation (arcsec) to count a match in catalog QC",
+    )
+    p.add_argument(
+        "--catalog-qc-min-matches",
+        type=int,
+        default=5,
+        help="Minimum matches needed for catalog QC ok=True",
+    )
+    p.add_argument(
+        "--catalog-qc-n-catalog-sources",
+        type=int,
+        default=50,
+        help="Number of reference catalog sources to compare against",
+    )
+    p.add_argument(
+        "--catalog-qc-n-measured-sources",
+        type=int,
+        default=None,
+        help="Number of measured image peaks to match (default: equals catalog used)",
+    )
+    p.add_argument(
+        "--catalog-qc-beam-deg",
+        type=str,
+        default=None,
+        metavar="BMAJ,BMIN",
+        help=(
+            "Beam major/minor FWHM in degrees for gaussian_fixed_beam centroiding "
+            "(overrides BMAJ/BMIN from image FITS header)"
+        ),
+    )
     p.add_argument("--bootstrap", type=int, default=400, help="Bootstrap resamples for median CI (0 to disable)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -622,6 +711,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--output-csv", type=str, default=None)
 
     args = p.parse_args(list(argv) if argv is not None else None)
+
+    args.catalog_qc_bmaj_deg = None
+    args.catalog_qc_bmin_deg = None
+    if args.catalog_qc_beam_deg:
+        parts = [x.strip() for x in str(args.catalog_qc_beam_deg).split(",")]
+        if len(parts) != 2:
+            raise SystemExit("--catalog-qc-beam-deg must be two comma-separated floats: BMAJ,BMIN (degrees).")
+        args.catalog_qc_bmaj_deg = float(parts[0])
+        args.catalog_qc_bmin_deg = float(parts[1])
 
     if args.search and (args.alphas or args.gammas):
         raise SystemExit("Use either --search or explicit --alphas/--gammas, not both.")
@@ -733,6 +831,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             "refine_maxiter": args.refine_maxiter,
             "catalog": args.catalog,
             "catalog_path": args.catalog_path,
+            "catalog_qc": bool(args.catalog_qc),
+            "catalog_qc_centroid_method": str(args.catalog_qc_centroid_method),
+            "catalog_qc_max_sep_arcsec": float(args.catalog_qc_max_sep_arcsec),
+            "catalog_qc_min_matches": int(args.catalog_qc_min_matches),
+            "catalog_qc_n_catalog_sources": int(args.catalog_qc_n_catalog_sources),
+            "catalog_qc_n_measured_sources": args.catalog_qc_n_measured_sources,
+            "catalog_qc_beam_deg": args.catalog_qc_beam_deg,
             "bootstrap": args.bootstrap,
             "seed": args.seed,
             "min_qa_rate": args.min_qa_rate,

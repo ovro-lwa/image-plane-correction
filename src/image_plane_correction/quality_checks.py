@@ -1,0 +1,151 @@
+"""
+Structured quality checks for dewarped vs raw images (catalog astrometry, logging helpers).
+
+Use from :func:`~image_plane_correction.flow.calcflow` or from tuning harnesses;
+keep imaging logic in ``source_detection`` / ``util.runqa``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping, MutableMapping, Union
+
+import numpy as np
+
+from . import source_detection
+
+
+def beam_fwhm_deg_for_catalog_qc(
+    image_fn: str,
+    centroid_method: str,
+    *,
+    bmaj_deg_override: float | None,
+    bmin_deg_override: float | None,
+) -> tuple[float | None, float | None]:
+    """FWHM major/minor in degrees for fixed-beam Gaussian centroiding; else ``(None, None)``."""
+    if str(centroid_method) != "gaussian_fixed_beam":
+        return None, None
+    if bmaj_deg_override is not None and bmin_deg_override is not None:
+        return float(bmaj_deg_override), float(bmin_deg_override)
+    from astropy.io import fits
+
+    hdr = fits.getheader(image_fn)
+    if "BMAJ" not in hdr or "BMIN" not in hdr:
+        raise ValueError(
+            "catalog QC with centroid_method=gaussian_fixed_beam requires BMAJ/BMIN in the "
+            "image FITS header, or provide beam FWHM overrides (degrees)."
+        )
+    return float(hdr["BMAJ"]), float(hdr["BMIN"])
+
+
+def _attach_prefixed(target: MutableMapping[str, Any], prefix: str, d: Mapping[str, Any]) -> None:
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, (float, np.floating)):
+            target[key] = float(v)
+        elif isinstance(v, (int, np.integer)):
+            target[key] = int(v)
+        elif isinstance(v, bool):
+            target[key] = bool(v)
+        else:
+            target[key] = v
+
+
+@dataclass
+class CatalogAstrometryQCParams:
+    """Parameters for :func:`catalog_astrometry_metrics_pair`."""
+
+    centroid_method: str = "centroid"
+    max_sep_arcsec: float = 120.0
+    min_matches: int = 5
+    n_catalog_sources: int = 50
+    n_measured_sources: int | None = None
+    min_separation_px: int = 15
+    min_flux: float = 0.0
+    pointlike_axis_ratio_max: float = 1.8
+    bmaj_deg: float | None = None
+    bmin_deg: float | None = None
+
+
+CatalogLike = Union[str, Any, np.ndarray]
+
+
+def catalog_astrometry_metrics_pair(
+    image_raw: np.ndarray,
+    image_dewarped: np.ndarray,
+    imwcs: Any,
+    catalog: CatalogLike,
+    catalog_path: str | None,
+    image_fn: str,
+    params: CatalogAstrometryQCParams | None = None,
+) -> dict[str, Any]:
+    """
+    Run catalog astrometry QC on raw and dewarped images; return flat metrics for JSON rows.
+
+    Keys match the tuning harness: ``catalog_qc_raw_*``, ``catalog_qc_dewarped_*``,
+    ``catalog_qc_delta_median_arcsec``.
+    """
+    p = params or CatalogAstrometryQCParams()
+    beam_deg = beam_fwhm_deg_for_catalog_qc(
+        image_fn,
+        str(p.centroid_method),
+        bmaj_deg_override=p.bmaj_deg,
+        bmin_deg_override=p.bmin_deg,
+    )
+    common_kw = dict(
+        imwcs=imwcs,
+        catalog=catalog,
+        catalog_path=catalog_path,
+        min_flux=float(p.min_flux),
+        n_catalog_sources=int(p.n_catalog_sources),
+        n_measured_sources=p.n_measured_sources,
+        min_separation_px=int(p.min_separation_px),
+        centroid_method=str(p.centroid_method),
+        beam_fwhm_deg=beam_deg,
+        max_sep_arcsec=float(p.max_sep_arcsec),
+        min_matches=int(p.min_matches),
+        pointlike_axis_ratio_max=float(p.pointlike_axis_ratio_max),
+    )
+    raw_qc = source_detection.catalog_astrometry_qc(np.asarray(image_raw), **common_kw)
+    dew_qc = source_detection.catalog_astrometry_qc(np.asarray(image_dewarped), **common_kw)
+
+    out: dict[str, Any] = {}
+    _attach_prefixed(out, "catalog_qc_raw_", dict(raw_qc))
+    _attach_prefixed(out, "catalog_qc_dewarped_", dict(dew_qc))
+
+    if bool(raw_qc.get("ok")) and bool(dew_qc.get("ok")):
+        raw_med = raw_qc.get("median_arcsec")
+        dew_med = dew_qc.get("median_arcsec")
+        if raw_med is not None and dew_med is not None and np.isfinite(float(raw_med)) and np.isfinite(float(dew_med)):
+            out["catalog_qc_delta_median_arcsec"] = float(raw_med) - float(dew_med)
+        else:
+            out["catalog_qc_delta_median_arcsec"] = None
+    else:
+        out["catalog_qc_delta_median_arcsec"] = None
+    return out
+
+
+def bright_source_qa_kwargs(
+    imwcs: Any,
+    header: Mapping[str, Any],
+    *,
+    catalog: str,
+    catalog_path: str | None,
+    n_sources: int,
+) -> dict[str, Any]:
+    """Keyword dict for :func:`~image_plane_correction.util.log_bright_source_flux_comparison`."""
+    return {
+        "imwcs": imwcs,
+        "catalog": catalog,
+        "catalog_path": catalog_path,
+        "n_sources": int(n_sources),
+        "bmaj_deg": float(header["BMAJ"]) if "BMAJ" in header else None,
+        "bmin_deg": float(header["BMIN"]) if "BMIN" in header else None,
+    }
+
+
+def log_bright_source_alignment(dewarped: Any, **kwargs: Any) -> None:
+    """Dispatch to legacy printer (Gaussian-fit peaks vs catalog)."""
+    from .util import log_bright_source_flux_comparison
+
+    log_bright_source_flux_comparison(dewarped, **kwargs)
