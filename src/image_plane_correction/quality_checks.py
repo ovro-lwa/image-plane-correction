@@ -17,14 +17,11 @@ from . import source_detection
 
 def beam_fwhm_deg_for_catalog_qc(
     image_fn: str,
-    centroid_method: str,
     *,
     bmaj_deg_override: float | None,
     bmin_deg_override: float | None,
 ) -> tuple[float | None, float | None]:
-    """FWHM major/minor in degrees for fixed-beam Gaussian centroiding; else ``(None, None)``."""
-    if str(centroid_method) != "gaussian_fixed_beam":
-        return None, None
+    """FWHM major/minor in degrees from overrides or FITS ``BMAJ`` / ``BMIN``."""
     if bmaj_deg_override is not None and bmin_deg_override is not None:
         return float(bmaj_deg_override), float(bmin_deg_override)
     from astropy.io import fits
@@ -32,8 +29,8 @@ def beam_fwhm_deg_for_catalog_qc(
     hdr = fits.getheader(image_fn)
     if "BMAJ" not in hdr or "BMIN" not in hdr:
         raise ValueError(
-            "catalog QC with centroid_method=gaussian_fixed_beam requires BMAJ/BMIN in the "
-            "image FITS header, or provide beam FWHM overrides (degrees)."
+            "catalog QC requires BMAJ/BMIN in the image FITS header, or beam overrides "
+            "(degrees) via CatalogAstrometryQCParams / --catalog-qc-beam-deg."
         )
     return float(hdr["BMAJ"]), float(hdr["BMIN"])
 
@@ -53,9 +50,8 @@ def _attach_prefixed(target: MutableMapping[str, Any], prefix: str, d: Mapping[s
 
 @dataclass
 class CatalogAstrometryQCParams:
-    """Parameters for :func:`catalog_astrometry_metrics_pair`."""
+    """Parameters for :func:`catalog_astrometry_metrics_pair` (PyBDSF-based measurement)."""
 
-    centroid_method: str = "centroid"
     max_sep_arcsec: float = 120.0
     min_matches: int = 5
     n_catalog_sources: int = 50
@@ -65,6 +61,14 @@ class CatalogAstrometryQCParams:
     pointlike_axis_ratio_max: float = 1.8
     bmaj_deg: float | None = None
     bmin_deg: float | None = None
+    beam_pa_deg: float = 0.0
+    bdsf_thresh: str | None = "hard"
+    bdsf_thresh_isl: float = 20.0
+    bdsf_thresh_pix: float = 5.0
+    bdsf_minpix_isl: int | None = None
+    bdsf_quiet: bool = True
+    restfreq_hz: float | None = None
+    bdsf_ncores: int = 4
 
 
 CatalogLike = Union[str, Any, np.ndarray]
@@ -88,10 +92,10 @@ def catalog_astrometry_metrics_pair(
     p = params or CatalogAstrometryQCParams()
     beam_deg = beam_fwhm_deg_for_catalog_qc(
         image_fn,
-        str(p.centroid_method),
         bmaj_deg_override=p.bmaj_deg,
         bmin_deg_override=p.bmin_deg,
     )
+    thresh = None if (p.bdsf_thresh is not None and str(p.bdsf_thresh).lower() == "auto") else p.bdsf_thresh
     common_kw = dict(
         imwcs=imwcs,
         catalog=catalog,
@@ -100,11 +104,18 @@ def catalog_astrometry_metrics_pair(
         n_catalog_sources=int(p.n_catalog_sources),
         n_measured_sources=p.n_measured_sources,
         min_separation_px=int(p.min_separation_px),
-        centroid_method=str(p.centroid_method),
         beam_fwhm_deg=beam_deg,
+        beam_pa_deg=float(p.beam_pa_deg),
         max_sep_arcsec=float(p.max_sep_arcsec),
         min_matches=int(p.min_matches),
         pointlike_axis_ratio_max=float(p.pointlike_axis_ratio_max),
+        bdsf_thresh=thresh,
+        bdsf_thresh_isl=float(p.bdsf_thresh_isl),
+        bdsf_thresh_pix=float(p.bdsf_thresh_pix),
+        bdsf_minpix_isl=p.bdsf_minpix_isl,
+        bdsf_quiet=bool(p.bdsf_quiet),
+        restfreq_hz=p.restfreq_hz,
+        bdsf_ncores=int(p.bdsf_ncores),
     )
     raw_qc = source_detection.catalog_astrometry_qc(np.asarray(image_raw), **common_kw)
     dew_qc = source_detection.catalog_astrometry_qc(np.asarray(image_dewarped), **common_kw)
@@ -141,11 +152,12 @@ def bright_source_qa_kwargs(
         "n_sources": int(n_sources),
         "bmaj_deg": float(header["BMAJ"]) if "BMAJ" in header else None,
         "bmin_deg": float(header["BMIN"]) if "BMIN" in header else None,
+        "bpa_deg": float(header["BPA"]) if "BPA" in header else 0.0,
     }
 
 
 def log_bright_source_alignment(dewarped: Any, **kwargs: Any) -> None:
-    """Dispatch to legacy printer (Gaussian-fit peaks vs catalog)."""
+    """Dispatch to legacy printer (PyBDSF positions vs catalog)."""
     from .util import log_bright_source_flux_comparison
 
     log_bright_source_flux_comparison(dewarped, **kwargs)

@@ -41,13 +41,13 @@ Each run calls ``calcflow`` per image and parameter pair; runtime scales with
 ``N_images × N_alpha × N_gamma`` (plus optional ``--refine`` L-BFGS-B iterations on
 ``log(alpha), log(gamma)`` within the grid bounds).
 
-The JSON output (schema ``image_plane_correction.optimize_alpha_gamma.v3``) stores per-row
+The JSON output (schema ``image_plane_correction.optimize_alpha_gamma.v4``) stores per-row
 metrics, ``composite_objective`` (structure score plus QA weighting), and an aggregated
 ``recommended`` pair based on median composite across images (tie-break: QA pass rate,
 then lower in-band curl/div ratio). Use ``--alphas`` / ``--gammas`` for a fixed small grid
 instead of ``--search`` when you already know candidates.
 
-Optional **catalog astrometry QC** compares detected peaks in the **raw** and **dewarped**
+Optional **catalog astrometry QC** compares **PyBDSF**-measured sources in the **raw** and **dewarped**
 images to your reference catalog (same ``--catalog`` / ``--catalog-path`` as ``calcflow``).
 Rows gain prefixed keys such as ``catalog_qc_raw_median_arcsec``,
 ``catalog_qc_dewarped_median_arcsec``, and ``catalog_qc_delta_median_arcsec`` when enabled:
@@ -60,13 +60,10 @@ PYTHONPATH=src python scripts/optimize_alpha_gamma.py --search \
   --output-json tuning_results.json
 ```
 
-Centroid refinement defaults to intensity-weighted ``centroid`` (beam-free). For a fixed-beam
-Gaussian fit (matching bright-source QA style), use ``--catalog-qc-centroid-method gaussian_fixed_beam``
-and either rely on ``BMAJ`` / ``BMIN`` in the image FITS header or pass
-``--catalog-qc-beam-deg BMAJ,BMIN`` (degrees).
+Beam major/minor FWHM in degrees are required for PyBDSF (from ``BMAJ`` / ``BMIN`` in the image FITS header or ``--catalog-qc-beam-deg BMAJ,BMIN``). Optional tuning flags include ``--catalog-qc-bdsf-thresh`` (``hard``, ``fdr``, or ``auto``), ``--catalog-qc-bdsf-thresh-isl``, ``--catalog-qc-bdsf-thresh-pix``, ``--catalog-qc-bdsf-minpix-isl``, and ``--catalog-qc-bdsf-ncores`` (default 4).
 
 Shared implementations live in ``image_plane_correction.quality_checks`` (catalog astrometry
 metrics and bright-source logging helpers). The tuning script calls these automatically when
-you pass ``--catalog-qc``. From Python you can also run ``calcflow(..., catalog_qc=True,
-quality_metrics={}, ...)`` to populate ``quality_metrics`` with the same ``catalog_qc_*`` keys;
-optional ``catalog_qc_params`` is a ``CatalogAstrometryQCParams`` instance for thresholds and centroid method.
+you pass ``--catalog-qc``. From Python you can run ``calcflow(..., catalog_qc=True)`` with
+default ``catalog_qc_params=None`` (uses :class:`~image_plane_correction.quality_checks.CatalogAstrometryQCParams`).
+Metrics are stored on ``flow.catalog_qc_metrics``; optionally pass ``quality_metrics={}`` to merge the same keys into your dict as well.

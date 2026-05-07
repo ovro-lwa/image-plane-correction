@@ -622,9 +622,11 @@ def log_bright_source_flux_comparison(
     pointlike_axis_ratio_max: float = 1.8,
     bmaj_deg: float | None = None,
     bmin_deg: float | None = None,
+    bpa_deg: float = 0.0,
+    bdsf_ncores: int = 4,
 ):
     """
-    Log source position agreement between dewarped-image peaks and a catalog.
+    Log source position agreement between PyBDSF-measured sources and a catalog.
 
     Parameters
     ----------
@@ -645,8 +647,11 @@ def log_bright_source_flux_comparison(
         Maximum major/minor-axis ratio to consider a source point-like when
         morphology columns are available in the source catalog.
     bmaj_deg, bmin_deg : float, optional
-        Beam FWHM major/minor axes in degrees. Used to fix Gaussian widths when
-        fitting source positions in the dewarped image.
+        Synthesized beam FWHM major/minor in degrees (passed to PyBDSF).
+    bpa_deg : float
+        Beam position angle in degrees (default 0).
+    bdsf_ncores : int
+        PyBDSF ``ncores`` for fitting/RMS parallelism (default 4).
     """
     dewarped_np = np.asarray(dewarped)
     if dewarped_np.ndim != 2:
@@ -677,30 +682,31 @@ def log_bright_source_flux_comparison(
 
     selected_catalog_xy = sd.select_top_catalog_sources(cat_xy, cat_flux, n_sources=n_sources)
 
-    # 2) Pick a matching number of bright peaks in the dewarped image.
-    n_peaks = max(int(n_sources), int(selected_catalog_xy.shape[0]))
-    peaks_xy = sd.detect_peaks(
-        dewarped_np,
-        n_peaks=n_peaks,
-        min_separation_px=min_separation_px,
-        finite_only=True,
-    )
-    if peaks_xy.size == 0:
-        print("Skipping bright-source position QA: no finite peaks found in dewarped image.")
-        return
-
-    # 3) Optional centroid refinement.
+    # 2) Measure sources with PyBDSF (brightest Gaussian components, deduplicated).
+    n_fit = max(int(n_sources), int(selected_catalog_xy.shape[0]))
     if imwcs is None or bmaj_deg is None or bmin_deg is None:
         raise ValueError(
-            "imwcs, bmaj_deg, and bmin_deg are required for Gaussian-fit source matching."
+            "imwcs, bmaj_deg, and bmin_deg are required for PyBDSF bright-source matching."
         )
-    refined_xy = sd.refine_centroids(
+    refined_xy = sd.detect_sources_bdsf_xy(
         dewarped_np,
-        peaks_xy,
-        method="gaussian_fixed_beam",
-        imwcs=imwcs,
-        beam_fwhm_deg=(bmaj_deg, bmin_deg),
+        imwcs,
+        beam_major_deg=float(bmaj_deg),
+        beam_minor_deg=float(bmin_deg),
+        beam_pa_deg=float(bpa_deg),
+        n_sources_max=int(n_fit),
+        min_separation_px=float(min_separation_px),
+        thresh="hard",
+        thresh_isl=20.0,
+        thresh_pix=5.0,
+        minpix_isl=None,
+        quiet=True,
+        restfreq_hz=None,
+        ncores=int(bdsf_ncores),
     )
+    if refined_xy.size == 0:
+        print("Skipping bright-source position QA: PyBDSF returned no sources.")
+        return
 
     # 4) Nearest-neighbor association in pixel space (legacy behavior for logging).
     idx_cat, dist_px = sd.match_xy_nearest(refined_xy, selected_catalog_xy)

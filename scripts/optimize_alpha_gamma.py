@@ -19,7 +19,7 @@ Coarse search + composite objective (see ``--w-struct`` / ``--w-qa``)::
         --images obs.fits --cleaned --output-json metrics.json
 
 Optional catalog astrometry QC (raw vs dewarped) via ``--catalog-qc``; JSON schema is
-``image_plane_correction.optimize_alpha_gamma.v3``.
+``image_plane_correction.optimize_alpha_gamma.v4``.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from image_plane_correction.flow import calcflow, horizon_r_normalized  # noqa: 
 from image_plane_correction import flow_metrics  # noqa: E402
 from image_plane_correction.quality_checks import CatalogAstrometryQCParams, catalog_astrometry_metrics_pair  # noqa: E402
 
-SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v3"
+SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v4"
 
 
 def _load_paths_from_file(path: Path) -> list[str]:
@@ -246,7 +246,11 @@ def evaluate_one(
     w_qa: float = 1.0,
     soft_qa: bool = False,
     catalog_qc: bool = False,
-    catalog_qc_centroid_method: str = "centroid",
+    catalog_qc_bdsf_thresh: str | None = "hard",
+    catalog_qc_bdsf_thresh_isl: float = 20.0,
+    catalog_qc_bdsf_thresh_pix: float = 5.0,
+    catalog_qc_bdsf_minpix_isl: int | None = None,
+    catalog_qc_bdsf_ncores: int = 4,
     catalog_qc_max_sep_arcsec: float = 120.0,
     catalog_qc_min_matches: int = 5,
     catalog_qc_n_catalog_sources: int = 50,
@@ -317,13 +321,17 @@ def evaluate_one(
 
         if catalog_qc:
             qc_params = CatalogAstrometryQCParams(
-                centroid_method=str(catalog_qc_centroid_method),
                 max_sep_arcsec=float(catalog_qc_max_sep_arcsec),
                 min_matches=int(catalog_qc_min_matches),
                 n_catalog_sources=int(catalog_qc_n_catalog_sources),
                 n_measured_sources=catalog_qc_n_measured_sources,
                 bmaj_deg=catalog_qc_bmaj_deg,
                 bmin_deg=catalog_qc_bmin_deg,
+                bdsf_thresh=catalog_qc_bdsf_thresh,
+                bdsf_thresh_isl=float(catalog_qc_bdsf_thresh_isl),
+                bdsf_thresh_pix=float(catalog_qc_bdsf_thresh_pix),
+                bdsf_minpix_isl=catalog_qc_bdsf_minpix_isl,
+                bdsf_ncores=int(catalog_qc_bdsf_ncores),
             )
             row.update(
                 catalog_astrometry_metrics_pair(
@@ -483,7 +491,11 @@ def _eval_kw(args: argparse.Namespace, band_deg: tuple[float, float]) -> dict[st
         "w_qa": float(args.w_qa),
         "soft_qa": bool(args.soft_qa),
         "catalog_qc": bool(args.catalog_qc),
-        "catalog_qc_centroid_method": str(args.catalog_qc_centroid_method),
+        "catalog_qc_bdsf_thresh": args.catalog_qc_bdsf_thresh,
+        "catalog_qc_bdsf_thresh_isl": float(args.catalog_qc_bdsf_thresh_isl),
+        "catalog_qc_bdsf_thresh_pix": float(args.catalog_qc_bdsf_thresh_pix),
+        "catalog_qc_bdsf_minpix_isl": args.catalog_qc_bdsf_minpix_isl,
+        "catalog_qc_bdsf_ncores": int(args.catalog_qc_bdsf_ncores),
         "catalog_qc_max_sep_arcsec": float(args.catalog_qc_max_sep_arcsec),
         "catalog_qc_min_matches": int(args.catalog_qc_min_matches),
         "catalog_qc_n_catalog_sources": int(args.catalog_qc_n_catalog_sources),
@@ -660,10 +672,34 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Compute catalog-based astrometry QC metrics (raw + dewarped) per evaluation",
     )
     p.add_argument(
-        "--catalog-qc-centroid-method",
-        choices=("none", "centroid", "gaussian_fixed_beam"),
-        default="centroid",
-        help="Centroid refinement method for catalog QC (default: centroid, beam-free)",
+        "--catalog-qc-bdsf-thresh",
+        choices=("auto", "hard", "fdr"),
+        default="hard",
+        help="PyBDSF thresh mode for catalog QC (auto: let PyBDSF choose).",
+    )
+    p.add_argument(
+        "--catalog-qc-bdsf-thresh-isl",
+        type=float,
+        default=20.0,
+        help="PyBDSF island detection threshold in sigma.",
+    )
+    p.add_argument(
+        "--catalog-qc-bdsf-thresh-pix",
+        type=float,
+        default=5.0,
+        help="PyBDSF pixel peak threshold in sigma.",
+    )
+    p.add_argument(
+        "--catalog-qc-bdsf-minpix-isl",
+        type=int,
+        default=None,
+        help="PyBDSF minimum island size in pixels (default: PyBDSF internal estimate).",
+    )
+    p.add_argument(
+        "--catalog-qc-bdsf-ncores",
+        type=int,
+        default=4,
+        help="PyBDSF parallel worker count (passed as ncores to process_image).",
     )
     p.add_argument(
         "--catalog-qc-max-sep-arcsec",
@@ -687,7 +723,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--catalog-qc-n-measured-sources",
         type=int,
         default=None,
-        help="Number of measured image peaks to match (default: equals catalog used)",
+        help="Max PyBDSF Gaussian components to retain after deduplication (default: equals catalog used)",
     )
     p.add_argument(
         "--catalog-qc-beam-deg",
@@ -695,7 +731,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=None,
         metavar="BMAJ,BMIN",
         help=(
-            "Beam major/minor FWHM in degrees for gaussian_fixed_beam centroiding "
+            "Beam major/minor FWHM in degrees for PyBDSF catalog QC "
             "(overrides BMAJ/BMIN from image FITS header)"
         ),
     )
@@ -832,7 +868,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             "catalog": args.catalog,
             "catalog_path": args.catalog_path,
             "catalog_qc": bool(args.catalog_qc),
-            "catalog_qc_centroid_method": str(args.catalog_qc_centroid_method),
+            "catalog_qc_bdsf_thresh": args.catalog_qc_bdsf_thresh,
+            "catalog_qc_bdsf_thresh_isl": float(args.catalog_qc_bdsf_thresh_isl),
+            "catalog_qc_bdsf_thresh_pix": float(args.catalog_qc_bdsf_thresh_pix),
+            "catalog_qc_bdsf_minpix_isl": args.catalog_qc_bdsf_minpix_isl,
+            "catalog_qc_bdsf_ncores": int(args.catalog_qc_bdsf_ncores),
             "catalog_qc_max_sep_arcsec": float(args.catalog_qc_max_sep_arcsec),
             "catalog_qc_min_matches": int(args.catalog_qc_min_matches),
             "catalog_qc_n_catalog_sources": int(args.catalog_qc_n_catalog_sources),

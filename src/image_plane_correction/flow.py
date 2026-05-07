@@ -36,6 +36,7 @@ PHASE2_SUBBANDS = [
 class Flow:
     offsets: Array
     direction: Direction
+    catalog_qc_metrics: Optional[MutableMapping[str, Any]] = None
 
     def __init__(self, offsets, direction: Direction = "backwards"):
         self.offsets = offsets
@@ -295,10 +296,10 @@ def calcflow(
     sanitization as the image after it is built or supplied (e.g. NaNs from
     beam/WCS outside the physical sky).
 
-    Set ``catalog_qc=True`` and pass a mutable mapping as ``quality_metrics`` (e.g. ``{}``)
-    to record catalog astrometry QC for raw vs dewarped images (see
-    :mod:`image_plane_correction.quality_checks`). Optional ``catalog_qc_params``
-    overrides defaults (:class:`~image_plane_correction.quality_checks.CatalogAstrometryQCParams`).
+    Set ``catalog_qc=True`` to run catalog astrometry QC on raw vs dewarped images using
+    PyBDSF for source measurement (see :mod:`image_plane_correction.quality_checks`). Results are merged into ``quality_metrics``
+    when that mapping is provided; otherwise they are stored only on ``flow.catalog_qc_metrics``.
+    ``catalog_qc_params=None`` uses default thresholds (:class:`~image_plane_correction.quality_checks.CatalogAstrometryQCParams`).
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
@@ -492,14 +493,12 @@ def calcflow(
     qa_passed = bool(score == 1)
 
     if catalog_qc:
-        if quality_metrics is None:
-            raise ValueError(
-                "calcflow(..., catalog_qc=True) requires quality_metrics=<mutable dict> "
-                "to store catalog_qc_* metrics (see image_plane_correction.quality_checks)."
-            )
-        params = catalog_qc_params
-        if params is None:
-            params = CatalogAstrometryQCParams()
+        sink: MutableMapping[str, Any] = quality_metrics if quality_metrics is not None else {}
+        params = (
+            catalog_qc_params
+            if catalog_qc_params is not None
+            else CatalogAstrometryQCParams()
+        )
         qc_row = catalog_astrometry_metrics_pair(
             np.asarray(image),
             np.asarray(dewarped),
@@ -509,7 +508,8 @@ def calcflow(
             image_fn,
             params,
         )
-        quality_metrics.update(qc_row)
+        sink.update(qc_row)
+        flow.catalog_qc_metrics = sink
 
     if write:
         if outroot is None:

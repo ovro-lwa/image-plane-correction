@@ -16,9 +16,96 @@ Conventions
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, Mapping, MutableMapping, Sequence
+import json
+import logging
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Mapping, MutableMapping
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def _prefer_bdsf_subprocess() -> bool:
+    """
+    PyBDSF uses multiprocessing with fork; that is unsafe once JAX has started threads.
+
+    When unset, run PyBDSF out-of-process if ``jax`` is already imported.
+
+    Override with environment variable:
+
+    - ``IMAGE_PLANE_CORRECTION_BDSF_SUBPROCESS=1`` — always use subprocess.
+    - ``IMAGE_PLANE_CORRECTION_BDSF_SUBPROCESS=0`` — never use subprocess (may warn with JAX).
+    """
+    v = os.environ.get("IMAGE_PLANE_CORRECTION_BDSF_SUBPROCESS", "").strip()
+    if v == "0":
+        return False
+    if v == "1":
+        return True
+    return sys.modules.get("jax") is not None
+
+
+def _run_bdsf_via_subprocess(
+    fits_path: str,
+    *,
+    process_kw: dict[str, Any],
+    min_separation_px: float,
+    n_sources_max: int | None,
+) -> np.ndarray:
+    """Run ``python -m image_plane_correction.pybdsf_worker`` with ``src`` on PYTHONPATH."""
+    fd_out, out_npy = tempfile.mkstemp(suffix=".npy")
+    os.close(fd_out)
+    out_npy = str(out_npy)
+    payload = dict(process_kw)
+    payload["__min_separation_px"] = float(min_separation_px)
+    payload["__n_sources_max"] = n_sources_max
+    serializable: dict[str, Any] = {}
+    for k, v in payload.items():
+        if k == "beam":
+            serializable[k] = [float(v[0]), float(v[1]), float(v[2])]
+        else:
+            serializable[k] = v
+
+    src_root = str(Path(__file__).resolve().parents[1])
+    env = os.environ.copy()
+    prev = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = src_root if not prev else f"{src_root}{os.pathsep}{prev}"
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "image_plane_correction.pybdsf_worker",
+        fits_path,
+        out_npy,
+        json.dumps(serializable),
+    ]
+    try:
+        # Do not use PIPE here: PyBDSF can be verbose; filling stderr/stdout pipes
+        # blocks the child and appears as a hang (classic subprocess deadlock).
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "PyBDSF subprocess failed with exit code %s "
+                "(set IMAGE_PLANE_CORRECTION_BDSF_SUBPROCESS=0 for in-process errors).",
+                proc.returncode,
+            )
+            return np.zeros((0, 2), dtype=np.float64)
+        return np.load(out_npy).astype(np.float64, copy=False)
+    finally:
+        try:
+            os.unlink(out_npy)
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -205,139 +292,245 @@ def select_top_catalog_sources(
     return cat_xy[order][:take].astype(np.float64)
 
 
-def detect_peaks(
-    image: np.ndarray,
+def _sanitize_array_for_bdsf(image: np.ndarray) -> np.ndarray:
+    """Finite pixels unchanged; NaN/inf set to 0 so PyBDSF sees blank sky rather than NaN islands."""
+    z = np.asarray(image, dtype=np.float32)
+    return np.where(np.isfinite(z), z, 0.0)
+
+
+def _fits_header_for_bdsf(
+    imwcs: Any,
+    shape_yx: tuple[int, int],
     *,
-    n_peaks: int,
-    min_separation_px: int = 15,
-    finite_only: bool = True,
+    beam_major_deg: float,
+    beam_minor_deg: float,
+    beam_pa_deg: float,
+    restfreq_hz: float | None,
+) -> Any:
+    """Build a minimal FITS header PyBDSF can read (WCS, beam, frequency)."""
+    hdr = imwcs.to_header(relax=True)
+    hdr["NAXIS"] = 2
+    hdr["NAXIS1"] = int(shape_yx[1])
+    hdr["NAXIS2"] = int(shape_yx[0])
+    hdr["BUNIT"] = hdr.get("BUNIT", "Jy/beam")
+    hdr["BMAJ"] = float(beam_major_deg)
+    hdr["BMIN"] = float(beam_minor_deg)
+    hdr["BPA"] = float(beam_pa_deg)
+    rf = restfreq_hz
+    if rf is None:
+        rf = float(hdr.get("RESTFREQ", hdr.get("RESTFRQ", 74e6)))
+    hdr["RESTFREQ"] = float(rf)
+    hdr["RESTFRQ"] = float(rf)
+    return hdr
+
+
+def _gaussian_rows_from_bdsf_image(img: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Collect fitted Gaussian centres (x,y) and sorting flux from a PyBDSF Image object."""
+    xy_list: list[tuple[float, float]] = []
+    flux_list: list[float] = []
+    for src in getattr(img, "sources", []) or []:
+        for g in getattr(src, "gaussians", []) or []:
+            cp = getattr(g, "centre_pix", None)
+            if cp is None or len(cp) < 2:
+                continue
+            x, y = float(cp[0]), float(cp[1])
+            if not np.isfinite(x) or not np.isfinite(y):
+                continue
+            pf = getattr(g, "peak_flux", None)
+            tf = getattr(g, "total_flux", None)
+            score = float(pf) if pf is not None and np.isfinite(float(pf)) else float(tf or 0.0)
+            xy_list.append((x, y))
+            flux_list.append(score)
+    return np.asarray(xy_list, dtype=np.float64), np.asarray(flux_list, dtype=np.float64)
+
+
+def _nms_xy_flux_sorted(
+    xy: np.ndarray,
+    flux: np.ndarray,
+    *,
+    min_separation_px: float,
+    max_keep: int | None,
+) -> np.ndarray:
+    """Greedy NMS on flux-sorted components (brightest first)."""
+    if xy.size == 0:
+        return xy.reshape((0, 2)).astype(np.float64)
+    order = np.argsort(-flux)
+    kept: list[tuple[float, float]] = []
+    min_sep = float(max(0.0, min_separation_px))
+    for i in order:
+        x, y = float(xy[i, 0]), float(xy[i, 1])
+        if min_sep > 0 and kept:
+            kxy = np.asarray(kept, dtype=float)
+            if np.any(np.hypot(kxy[:, 0] - x, kxy[:, 1] - y) < min_sep):
+                continue
+        kept.append((x, y))
+        if max_keep is not None and len(kept) >= int(max_keep):
+            break
+    return np.asarray(kept, dtype=np.float64)
+
+
+def detect_sources_bdsf_xy(
+    image: np.ndarray,
+    imwcs: Any,
+    *,
+    beam_major_deg: float,
+    beam_minor_deg: float,
+    beam_pa_deg: float = 0.0,
+    n_sources_max: int | None,
+    min_separation_px: float = 15.0,
+    thresh: str | None = "hard",
+    thresh_isl: float = 20.0,
+    thresh_pix: float = 5.0,
+    minpix_isl: int | None = None,
+    quiet: bool = True,
+    restfreq_hz: float | None = None,
+    ncores: int = 4,
 ) -> np.ndarray:
     """
-    Simple deterministic peak picker with non-maximum suppression.
+    Run PyBDSF on a 2D array and return up to ``n_sources_max`` Gaussian centres (x, y), 0-based pixels.
 
-    Returns an ``(M,2)`` array of peak positions in pixel coords (x,y), sorted by peak value desc.
+    Non-finite image values are replaced with 0 before processing.
+
+    PyBDSF ``ncores`` defaults to 4 (passed through to ``bdsf.process_image``).
+
+    If ``jax`` is already imported in this interpreter, PyBDSF is run in a subprocess
+    by default (PyBDSF uses fork-based multiprocessing, which conflicts with JAX threads).
+    Set ``IMAGE_PLANE_CORRECTION_BDSF_SUBPROCESS=0`` to force in-process execution.
+    Subprocess stdout/stderr are discarded to avoid pipe deadlock on verbose runs.
     """
-    if n_peaks <= 0:
-        raise ValueError("n_peaks must be positive.")
-    z = np.asarray(image)
+    z = _sanitize_array_for_bdsf(image)
     if z.ndim != 2:
         raise ValueError("image must be 2D.")
 
-    flat_idx = np.argsort(z.ravel())[::-1]
-    peaks: list[tuple[float, float]] = []
-    for idx in flat_idx:
-        y, x = np.unravel_index(idx, z.shape)
-        if finite_only and not np.isfinite(z[y, x]):
-            continue
-        if peaks:
-            peak_xy = np.asarray(peaks, dtype=float)
-            deltas = peak_xy - np.array([x, y], dtype=float)
-            if np.any(np.linalg.norm(deltas, axis=1) < float(min_separation_px)):
-                continue
-        peaks.append((float(x), float(y)))
-        if len(peaks) >= int(n_peaks):
-            break
-    return np.asarray(peaks, dtype=np.float64)
+    ncores_used = max(1, int(ncores))
 
+    hdr = _fits_header_for_bdsf(
+        imwcs,
+        z.shape,
+        beam_major_deg=float(beam_major_deg),
+        beam_minor_deg=float(beam_minor_deg),
+        beam_pa_deg=float(beam_pa_deg),
+        restfreq_hz=restfreq_hz,
+    )
 
-def refine_centroids(
-    image: np.ndarray,
-    peaks_xy: np.ndarray,
-    *,
-    method: Literal["none", "centroid", "gaussian_fixed_beam"] = "gaussian_fixed_beam",
-    imwcs: Any | None = None,
-    beam_fwhm_deg: tuple[float | None, float | None] = (None, None),
-) -> np.ndarray:
-    """
-    Refine peak positions to sub-pixel centroids.
+    fd, path = tempfile.mkstemp(suffix=".fits")
+    os.close(fd)
+    path = str(path)
+    try:
+        from astropy.io import fits
 
-    - ``none``: returns input.
-    - ``centroid``: intensity-weighted centroid in a local window.
-    - ``gaussian_fixed_beam``: least-squares fit of a fixed-width 2D Gaussian.
-    """
-    z = np.asarray(image, dtype=float)
-    xy = np.asarray(peaks_xy, dtype=float)
-    if xy.size == 0:
-        return xy.reshape((0, 2)).astype(np.float64)
-
-    if method == "none":
-        return xy.astype(np.float64)
-
-    if method == "centroid":
-        out = []
-        for x0, y0 in xy:
-            ix = int(np.rint(x0))
-            iy = int(np.rint(y0))
-            half = 5
-            y0w = max(0, iy - half)
-            y1w = min(z.shape[0], iy + half + 1)
-            x0w = max(0, ix - half)
-            x1w = min(z.shape[1], ix + half + 1)
-            patch = z[y0w:y1w, x0w:x1w]
-            if patch.size == 0 or not np.all(np.isfinite(patch)):
-                out.append((float(x0), float(y0)))
-                continue
-            yy, xx = np.indices(patch.shape, dtype=float)
-            xx += x0w
-            yy += y0w
-            w = np.clip(patch, 0.0, np.inf)
-            s = float(np.sum(w))
-            if s <= 0:
-                out.append((float(x0), float(y0)))
-                continue
-            xc = float(np.sum(xx * w) / s)
-            yc = float(np.sum(yy * w) / s)
-            out.append((xc, yc))
-        return np.asarray(out, dtype=np.float64)
-
-    if method != "gaussian_fixed_beam":
-        raise ValueError(f"Unknown method: {method!r}")
-
-    bmaj_deg, bmin_deg = beam_fwhm_deg
-    if imwcs is None or bmaj_deg is None or bmin_deg is None:
-        raise ValueError("imwcs, bmaj_deg, and bmin_deg are required for gaussian_fixed_beam refinement.")
-
-    from astropy.wcs.utils import proj_plane_pixel_scales
-    from scipy.optimize import least_squares
-
-    pix_scales = np.abs(proj_plane_pixel_scales(imwcs))
-    sigma_y = (float(bmaj_deg) / float(pix_scales[1])) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-    sigma_x = (float(bmin_deg) / float(pix_scales[0])) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-    half = int(max(4, np.ceil(3.0 * max(sigma_x, sigma_y))))
-
-    out = []
-    for x0, y0 in xy:
-        ix = int(np.rint(x0))
-        iy = int(np.rint(y0))
-        y0w = max(0, iy - half)
-        y1w = min(z.shape[0], iy + half + 1)
-        x0w = max(0, ix - half)
-        x1w = min(z.shape[1], ix + half + 1)
-        patch = z[y0w:y1w, x0w:x1w]
-        if patch.size == 0 or not np.all(np.isfinite(patch)):
-            out.append((float(x0), float(y0)))
-            continue
-
-        yy, xx = np.indices(patch.shape, dtype=float)
-        xx += x0w
-        yy += y0w
-        amp = float(np.nanmax(patch))
-
-        def residuals(params: Sequence[float]) -> np.ndarray:
-            xc, yc = params
-            model = amp * np.exp(-0.5 * (((xx - xc) / sigma_x) ** 2 + ((yy - yc) / sigma_y) ** 2))
-            return (patch - model).ravel()
-
-        fit = least_squares(
-            residuals,
-            x0=np.array([x0, y0], dtype=float),
-            bounds=(
-                np.array([x0w, y0w], dtype=float),
-                np.array([x1w - 1, y1w - 1], dtype=float),
-            ),
+        fits.writeto(path, z, hdr, overwrite=True)
+        beam = (float(beam_major_deg), float(beam_minor_deg), float(beam_pa_deg))
+        process_kw: dict[str, Any] = dict(
+            beam=beam,
+            thresh_isl=float(thresh_isl),
+            thresh_pix=float(thresh_pix),
+            atrous_do=False,
+            psf_vary_do=False,
+            quiet=bool(quiet),
+            ncores=ncores_used,
         )
-        out.append((float(fit.x[0]), float(fit.x[1])))
-    return np.asarray(out, dtype=np.float64)
+        if thresh is not None:
+            process_kw["thresh"] = str(thresh)
+        if minpix_isl is not None:
+            process_kw["minpix_isl"] = int(minpix_isl)
+
+        if _prefer_bdsf_subprocess():
+            return _run_bdsf_via_subprocess(
+                path,
+                process_kw=process_kw,
+                min_separation_px=float(min_separation_px),
+                n_sources_max=n_sources_max,
+            )
+
+        import bdsf
+
+        try:
+            img = bdsf.process_image(path, **process_kw)
+        except Exception as exc:
+            logger.warning("PyBDSF process_image failed: %s", exc)
+            return np.zeros((0, 2), dtype=np.float64)
+
+        xy_all, flux_all = _gaussian_rows_from_bdsf_image(img)
+        return _nms_xy_flux_sorted(
+            xy_all,
+            flux_all,
+            min_separation_px=min_separation_px,
+            max_keep=n_sources_max,
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def identify_sources_bdsf(
+    input_image: str | os.PathLike[str],
+    imwcs: Any,
+    work_dir: str | None = None,
+    *,
+    beam_fwhm_deg: tuple[float, float] | None = None,
+    beam_pa_deg: float = 0.0,
+    n_sources_max: int | None = None,
+    min_separation_px: float = 0.0,
+    thresh: str | None = "hard",
+    thresh_isl: float = 20.0,
+    thresh_pix: float = 5.0,
+    minpix_isl: int | None = None,
+    quiet: bool = True,
+    restfreq_hz: float | None = None,
+    ncores: int = 4,
+) -> Any:
+    """
+    Run PyBDSF on a FITS image path; return ``SkyCoord`` (ICRS) for fitted Gaussian centres.
+
+    ``work_dir`` is accepted for API compatibility with legacy scripts and ignored.
+
+    If ``beam_fwhm_deg`` is omitted, ``BMAJ`` / ``BMIN`` are read from the FITS header (degrees).
+    """
+    _ = work_dir  # unused
+    from astropy.io import fits as fits_io
+
+    path = Path(input_image)
+    with fits_io.open(path, memmap=False) as hdul:
+        data = np.squeeze(np.asarray(hdul[0].data, dtype=np.float32))
+        header = hdul[0].header
+
+    if data.ndim != 2:
+        raise ValueError(f"Expected a 2D image array after squeezing; got shape {data.shape}.")
+
+    if beam_fwhm_deg is None:
+        if "BMAJ" not in header or "BMIN" not in header:
+            raise ValueError("beam_fwhm_deg required when FITS header lacks BMAJ/BMIN.")
+        bmaj = float(header["BMAJ"])
+        bmin = float(header["BMIN"])
+    else:
+        bmaj, bmin = float(beam_fwhm_deg[0]), float(beam_fwhm_deg[1])
+
+    rf = restfreq_hz
+    if rf is None and "RESTFREQ" in header:
+        rf = float(header["RESTFREQ"])
+    elif rf is None and "RESTFRQ" in header:
+        rf = float(header["RESTFRQ"])
+
+    xy = detect_sources_bdsf_xy(
+        data,
+        imwcs,
+        beam_major_deg=bmaj,
+        beam_minor_deg=bmin,
+        beam_pa_deg=float(header.get("BPA", beam_pa_deg)),
+        n_sources_max=n_sources_max,
+        min_separation_px=min_separation_px,
+        thresh=thresh,
+        thresh_isl=thresh_isl,
+        thresh_pix=thresh_pix,
+        minpix_isl=minpix_isl,
+        quiet=quiet,
+        restfreq_hz=rf,
+        ncores=ncores,
+    )
+    return pixels_to_skycoord(xy, imwcs, origin=0)
 
 
 def match_xy_nearest(
@@ -443,22 +636,31 @@ def catalog_astrometry_qc(
     n_catalog_sources: int = 50,
     n_measured_sources: int | None = None,
     min_separation_px: int = 15,
-    centroid_method: Literal["none", "centroid", "gaussian_fixed_beam"] = "gaussian_fixed_beam",
     beam_fwhm_deg: tuple[float | None, float | None] = (None, None),
+    beam_pa_deg: float = 0.0,
     pointlike_axis_ratio_max: float = 1.8,
     max_sep_arcsec: float = 120.0,
     min_matches: int = 5,
+    bdsf_thresh: str | None = "hard",
+    bdsf_thresh_isl: float = 20.0,
+    bdsf_thresh_pix: float = 5.0,
+    bdsf_minpix_isl: int | None = None,
+    bdsf_quiet: bool = True,
+    restfreq_hz: float | None = None,
+    bdsf_ncores: int = 4,
 ) -> MutableMapping[str, Any]:
     """
-    End-to-end catalog-based astrometric QC.
+    End-to-end catalog-based astrometric QC using PyBDSF for source measurement.
 
     Steps:
     1) Load reference catalog and filter to image footprint.
     2) Select top ``n_catalog_sources`` catalog entries (by flux if available).
-    3) Detect bright peaks in the image (with NMS).
-    4) Optionally refine centroids.
-    5) Convert measured peaks to SkyCoord and match to catalog SkyCoord.
-    6) Summarize separations and compute match yield within ``max_sep_arcsec``.
+    3) Run PyBDSF on the image (non-finite pixels treated as blank); take brightest
+       Gaussian components with optional separation-based deduplication.
+    4) Match measured sky positions to the selected catalog (nearest neighbour).
+    5) Summarize separations and match yield within ``max_sep_arcsec``.
+
+    ``beam_fwhm_deg`` must provide both major and minor FWHM in degrees (synthesized beam).
 
     Returns a dict designed to be JSON-serializable (SkyCoord objects excluded).
     """
@@ -517,16 +719,30 @@ def catalog_astrometry_qc(
     if n_measured_sources <= 0:
         raise ValueError("n_measured_sources must be positive.")
 
-    peaks_xy = detect_peaks(
+    bmaj_deg, bmin_deg = beam_fwhm_deg
+    if bmaj_deg is None or bmin_deg is None:
+        raise ValueError("catalog_astrometry_qc requires beam_fwhm_deg=(bmaj_deg, bmin_deg) in degrees.")
+
+    measured_xy = detect_sources_bdsf_xy(
         z,
-        n_peaks=int(n_measured_sources),
-        min_separation_px=int(min_separation_px),
-        finite_only=True,
+        imwcs,
+        beam_major_deg=float(bmaj_deg),
+        beam_minor_deg=float(bmin_deg),
+        beam_pa_deg=float(beam_pa_deg),
+        n_sources_max=int(n_measured_sources),
+        min_separation_px=float(min_separation_px),
+        thresh=bdsf_thresh,
+        thresh_isl=float(bdsf_thresh_isl),
+        thresh_pix=float(bdsf_thresh_pix),
+        minpix_isl=bdsf_minpix_isl,
+        quiet=bool(bdsf_quiet),
+        restfreq_hz=restfreq_hz,
+        ncores=int(bdsf_ncores),
     )
-    if peaks_xy.size == 0:
+    if measured_xy.size == 0:
         return {
             "ok": False,
-            "reason": "no_measured_peaks",
+            "reason": "no_measured_sources",
             "n_catalog_visible": int(cat_xy.shape[0]),
             "n_catalog_used": int(selected_cat_xy.shape[0]),
             "n_measured": 0,
@@ -536,20 +752,7 @@ def catalog_astrometry_qc(
             **summarize_angular_separations_deg(np.array([], dtype=float)),
         }
 
-    if centroid_method == "gaussian_fixed_beam":
-        bmaj_deg, bmin_deg = beam_fwhm_deg
-        if bmaj_deg is None or bmin_deg is None:
-            raise ValueError("beam_fwhm_deg must be provided for gaussian_fixed_beam centroiding.")
-
-    refined_xy = refine_centroids(
-        z,
-        peaks_xy,
-        method=centroid_method,
-        imwcs=imwcs,
-        beam_fwhm_deg=beam_fwhm_deg,
-    )
-
-    measured_sky = pixels_to_skycoord(refined_xy, imwcs, origin=0)
+    measured_sky = pixels_to_skycoord(measured_xy, imwcs, origin=0)
 
     # Convert selected catalog xy back to sky via WCS to avoid depending on the
     # original catalog sky ordering after filtering/selection.
@@ -559,7 +762,7 @@ def catalog_astrometry_qc(
     sep_arcsec = np.asarray(sep_deg, dtype=float) * 3600.0
     matched = np.isfinite(sep_arcsec) & (sep_arcsec <= float(max_sep_arcsec))
     n_matched = int(np.count_nonzero(matched))
-    frac = float(n_matched / max(1, refined_xy.shape[0]))
+    frac = float(n_matched / max(1, measured_xy.shape[0]))
 
     stats = summarize_angular_separations_deg(sep_deg[matched])
     ok = bool(n_matched >= int(min_matches))
@@ -569,7 +772,7 @@ def catalog_astrometry_qc(
         "reason": "ok" if ok else "too_few_matches",
         "n_catalog_visible": int(cat_xy.shape[0]),
         "n_catalog_used": int(selected_cat_xy.shape[0]),
-        "n_measured": int(refined_xy.shape[0]),
+        "n_measured": int(measured_xy.shape[0]),
         "n_matched": n_matched,
         "matched_fraction": frac,
         "max_sep_arcsec": float(max_sep_arcsec),

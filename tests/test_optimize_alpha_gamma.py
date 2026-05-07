@@ -341,9 +341,21 @@ class TestOptimizeCLI(unittest.TestCase):
         pixel_catalog = np.array([[8.0, 8.0]], dtype=float)
 
         spec = mod.ImageSpec(image="/tmp/fake.fits", psf="/tmp/fake.psf", reference_sky_fn=None)
+
+        def fake_catalog_qc_metrics(*_a, **_k):
+            return {
+                "catalog_qc_raw_ok": True,
+                "catalog_qc_raw_reason": "ok",
+                "catalog_qc_dewarped_ok": True,
+                "catalog_qc_dewarped_reason": "ok",
+                "catalog_qc_delta_median_arcsec": 0.0,
+            }
+
         with mock.patch.object(mod, "calcflow", side_effect=fake_calcflow), mock.patch.object(
             mod, "fits_image", side_effect=fake_fits_image
-        ), mock.patch.object(mod, "horizon_r_normalized", return_value=0.7):
+        ), mock.patch.object(mod, "horizon_r_normalized", return_value=0.7), mock.patch.object(
+            mod, "catalog_astrometry_metrics_pair", side_effect=fake_catalog_qc_metrics
+        ):
             row = mod.evaluate_one(
                 spec,
                 1.3,
@@ -365,7 +377,6 @@ class TestOptimizeCLI(unittest.TestCase):
                 w_qa=1.0,
                 soft_qa=False,
                 catalog_qc=True,
-                catalog_qc_centroid_method="centroid",
                 catalog_qc_max_sep_arcsec=300.0,
                 catalog_qc_min_matches=1,
                 catalog_qc_n_catalog_sources=1,
