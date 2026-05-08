@@ -54,11 +54,13 @@ def theoretical_sky(
     If desired, a flow field can be provided that perturbs the point sources before the convolution with the PSF.
     """
     positions, fluxes = reference_sources(catalog, min_flux=min_flux, path=path)
+    n_total = int(len(positions))
 
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
 
     # filter out NaNs, e.g. sources not in the field of view
     ignore_positions = jnp.isnan(positions_xy).any(axis=1)
+    n_finite = int(n_total - int(np.count_nonzero(np.asarray(ignore_positions))))
     fluxes = fluxes[~ignore_positions]
     positions_xy = positions_xy[~ignore_positions]
     positions = positions[~np.asarray(ignore_positions)]
@@ -74,12 +76,25 @@ def theoretical_sky(
         & (positions_xy[:, 1] >= 0)
         & (positions_xy[:, 1] < img_size)
     )
+    n_in_bounds = int(np.count_nonzero(np.asarray(in_bounds)))
     fluxes = fluxes[in_bounds]
     positions_xy = positions_xy[in_bounds]
     positions = positions[np.asarray(in_bounds)]
+    if n_in_bounds == 0:
+        zen = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs, origin=0)
+        raise ValueError(
+            "No reference catalog sources project inside the image footprint after WCS projection. "
+            f"catalog={catalog!r} n_total={n_total} n_finite_pix={n_finite} n_in_bounds={n_in_bounds} "
+            f"img_size={img_size} wcs_center=({zen.ra.deg:.6f},{zen.dec.deg:.6f}) path={path!r}"
+        )
 
     # clip maximum flux (since PSF * large flux tends to overwhelm the image)
     fluxes = jnp.clip(fluxes, 0, max_flux)
+    # Drop any non-finite fluxes; a single NaN can poison the FFT convolution output.
+    finite_flux = jnp.isfinite(fluxes)
+    fluxes = fluxes[finite_flux]
+    positions_xy = positions_xy[finite_flux]
+    positions = positions[np.asarray(finite_flux)]
 
     # compute beam function (flux falling off towards edge of image)
     zenith = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs)
@@ -188,10 +203,12 @@ def theoretical_sky_beam_function(
         use_best_pb_model = use_pb_correct
 
     positions, fluxes = reference_sources(catalog, min_flux=min_flux, path=path)
+    n_total = int(len(positions))
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
 
     # filter out NaNs, e.g. sources not in the field of view
     ignore_positions = jnp.isnan(positions_xy).any(axis=1)
+    n_finite = int(n_total - int(np.count_nonzero(np.asarray(ignore_positions))))
     fluxes = fluxes[~ignore_positions]
     positions_xy = positions_xy[~ignore_positions]
     positions = positions[~np.asarray(ignore_positions)]
@@ -206,12 +223,25 @@ def theoretical_sky_beam_function(
         & (positions_xy[:, 1] >= 0)
         & (positions_xy[:, 1] < img_size)
     )
+    n_in_bounds = int(np.count_nonzero(np.asarray(in_bounds)))
     fluxes = fluxes[in_bounds]
     positions_xy = positions_xy[in_bounds]
     positions = positions[np.asarray(in_bounds)]
+    if n_in_bounds == 0:
+        zen = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs, origin=0)
+        raise ValueError(
+            "No reference catalog sources project inside the image footprint after WCS projection. "
+            f"catalog={catalog!r} n_total={n_total} n_finite_pix={n_finite} n_in_bounds={n_in_bounds} "
+            f"img_size={img_size} wcs_center=({zen.ra.deg:.6f},{zen.dec.deg:.6f}) path={path!r}"
+        )
 
     # clip maximum flux (since PSF * large flux tends to overwhelm the image)
     fluxes = jnp.clip(fluxes, 0, max_flux)
+    # Drop any non-finite fluxes; a single NaN can poison the FFT convolution output.
+    finite_flux = jnp.isfinite(fluxes)
+    fluxes = fluxes[finite_flux]
+    positions_xy = positions_xy[finite_flux]
+    positions = positions[np.asarray(finite_flux)]
 
     beam = None
     if use_best_pb_model:
@@ -229,6 +259,9 @@ def theoretical_sky_beam_function(
         obs_date=obs_date,
         freq_hz=freq_hz,
     )
+    # WCS projections can yield non-finite world coordinates at some pixels; treat those
+    # as "no beam response" rather than allowing NaNs to propagate through FFT convolution.
+    response_map = jnp.where(jnp.isfinite(response_map), response_map, 0.0)
 
     # compute sub-pixel area for each source, assuming samples to be located
     # at the center of each pixel

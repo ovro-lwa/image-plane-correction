@@ -468,13 +468,9 @@ def calcflow(
             freq_hz=freq_hz,
         )
     else:
-        reference_sky = _sanitize_finite_jax(reference_sky, "reference_sky")
-
-    if cleaned:
-        reference_sky = _sanitize_finite_jax(
-            reference_sky,
-            "reference_sky (cleaned=True)",
-        )
+        # Treat user-supplied reference_sky as "truth": fail if it contains NaNs/Infs
+        # rather than silently filling.
+        pass
 
     if np.asarray(image).shape != np.asarray(reference_sky).shape:
         raise ValueError(
