@@ -160,6 +160,8 @@ class TestOptimizeAggregate(unittest.TestCase):
                 quiet=True,
                 w_struct=1.0,
                 w_qa=1.0,
+                w_catalog_qa=0.0,
+                catalog_qa_scale_arcsec=120.0,
                 soft_qa=False,
             )
 
@@ -216,6 +218,10 @@ class TestOptimizeCLI(unittest.TestCase):
                 "1.0",
                 "--gammas",
                 "10,20",
+                "--w-catalog-qa",
+                "0.0",
+                "--catalog-qa-scale-arcsec",
+                "120.0",
                 "--bootstrap",
                 "0",
                 "--structure-mask",
@@ -375,6 +381,8 @@ class TestOptimizeCLI(unittest.TestCase):
                 quiet=True,
                 w_struct=1.0,
                 w_qa=1.0,
+                w_catalog_qa=1.0,
+                catalog_qa_scale_arcsec=120.0,
                 soft_qa=False,
                 catalog_qa=True,
                 catalog_qa_max_sep_arcsec=300.0,
@@ -387,6 +395,7 @@ class TestOptimizeCLI(unittest.TestCase):
         self.assertIn("catalog_qa_raw_ok", row)
         self.assertIn("catalog_qa_dewarped_ok", row)
         self.assertIn("catalog_qa_delta_median_arcsec", row)
+        self.assertIsNotNone(row["composite_objective"])
 
 
 if __name__ == "__main__":

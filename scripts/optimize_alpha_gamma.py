@@ -106,10 +106,16 @@ def composite_objective_from_row(
     *,
     w_struct: float,
     w_qa: float,
+    w_catalog_qa: float,
+    catalog_qa_scale_arcsec: float,
     soft_qa: bool,
 ) -> float | None:
     """
-    Per-image composite objective: ``w_struct * structure_score + w_qa * qa_scalar``.
+    Per-image composite objective:
+
+    - ``w_struct * structure_score``
+    - ``w_qa * qa_scalar``
+    - ``w_catalog_qa * catalog_alignment_score``
 
     When QA fails and ``soft_qa`` is false, returns ``None`` (drop from median aggregate).
     With ``soft_qa``, ``qa_scalar`` is 0 so the row still contributes structure term only.
@@ -126,7 +132,27 @@ def composite_objective_from_row(
     if not qa_ok and not soft_qa:
         return None
     qa_scalar = 1.0 if qa_ok else 0.0
-    return float(w_struct * struct + w_qa * qa_scalar)
+
+    # Catalog alignment score (soft): prefer lower dewarped median separations, modulated by match yield.
+    # Score is in [0,1], with 1 meaning "perfect alignment".
+    cat_score = 0.0
+    if w_catalog_qa != 0.0:
+        med = row.get("catalog_qa_dewarped_median_arcsec")
+        matched_frac = row.get("catalog_qa_dewarped_matched_fraction")
+        ok = row.get("catalog_qa_dewarped_ok")
+        if med is not None and np.isfinite(float(med)) and float(med) >= 0:
+            scale = float(catalog_qa_scale_arcsec)
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 120.0
+            # 1/(1+x) soft preference; robust and bounded.
+            align = 1.0 / (1.0 + float(med) / scale)
+            if matched_frac is not None and np.isfinite(float(matched_frac)):
+                align *= float(np.clip(float(matched_frac), 0.0, 1.0))
+            if ok is not None and not bool(ok):
+                align *= 0.0
+            cat_score = float(align)
+
+    return float(w_struct * struct + w_qa * qa_scalar + w_catalog_qa * cat_score)
 
 
 def _coarse_geom_grid(
@@ -244,6 +270,8 @@ def evaluate_one(
     quiet: bool,
     w_struct: float = 1.0,
     w_qa: float = 1.0,
+    w_catalog_qa: float = 0.0,
+    catalog_qa_scale_arcsec: float = 120.0,
     soft_qa: bool = False,
     catalog_qa: bool = False,
     catalog_qa_bdsf_thresh: str | None = "hard",
@@ -347,7 +375,12 @@ def evaluate_one(
 
         row["calcflow_stdout"] = buf.getvalue() if quiet else ""
         row["composite_objective"] = composite_objective_from_row(
-            row, w_struct=w_struct, w_qa=w_qa, soft_qa=soft_qa
+            row,
+            w_struct=w_struct,
+            w_qa=w_qa,
+            w_catalog_qa=w_catalog_qa,
+            catalog_qa_scale_arcsec=catalog_qa_scale_arcsec,
+            soft_qa=soft_qa,
         )
     except Exception as exc:
         row["error"] = f"{type(exc).__name__}: {exc}"
@@ -489,6 +522,8 @@ def _eval_kw(args: argparse.Namespace, band_deg: tuple[float, float]) -> dict[st
         "quiet": args.quiet,
         "w_struct": float(args.w_struct),
         "w_qa": float(args.w_qa),
+        "w_catalog_qa": float(args.w_catalog_qa),
+        "catalog_qa_scale_arcsec": float(args.catalog_qa_scale_arcsec),
         "soft_qa": bool(args.soft_qa),
         "catalog_qa": bool(args.catalog_qa),
         "catalog_qa_bdsf_thresh": args.catalog_qa_bdsf_thresh,
@@ -625,6 +660,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=float,
         default=1.0,
         help="Weight on QA scalar (1 pass / 0 fail) in composite objective",
+    )
+    p.add_argument(
+        "--w-catalog-qa",
+        type=float,
+        default=0.0,
+        help="Weight on catalog alignment score (dewarped source positions vs catalog) in composite objective",
+    )
+    p.add_argument(
+        "--catalog-qa-scale-arcsec",
+        type=float,
+        default=120.0,
+        help="Scale (arcsec) for the soft catalog alignment score: score=1/(1+median_arcsec/scale).",
     )
     p.add_argument(
         "--soft-qa",
@@ -862,6 +909,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "qa": args.qa,
             "w_struct": args.w_struct,
             "w_qa": args.w_qa,
+            "w_catalog_qa": args.w_catalog_qa,
+            "catalog_qa_scale_arcsec": args.catalog_qa_scale_arcsec,
             "soft_qa": args.soft_qa,
             "refine": bool(args.refine),
             "refine_maxiter": args.refine_maxiter,
