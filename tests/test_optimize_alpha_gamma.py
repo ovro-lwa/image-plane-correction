@@ -234,7 +234,7 @@ class TestOptimizeCLI(unittest.TestCase):
             self.assertIn("aggregate", data)
             self.assertIn("metrics_structure_score", data["rows"][0])
             self.assertIn("composite_objective", data["rows"][0])
-            self.assertIn("catalog_qc", data["params"])
+            self.assertIn("catalog_qa", data["params"])
 
     def test_search_mode_small_grid(self):
         mod = _load_opt_script()
@@ -305,7 +305,7 @@ class TestOptimizeCLI(unittest.TestCase):
             self.assertEqual(data["params"]["grid_size"], 4)
             self.assertEqual(len(data["rows"]), 4)
 
-    def test_catalog_qc_enabled_with_pixel_catalog(self):
+    def test_catalog_qa_enabled_with_pixel_catalog(self):
         mod = _load_opt_script()
 
         class FakeFlow:
@@ -342,19 +342,19 @@ class TestOptimizeCLI(unittest.TestCase):
 
         spec = mod.ImageSpec(image="/tmp/fake.fits", psf="/tmp/fake.psf", reference_sky_fn=None)
 
-        def fake_catalog_qc_metrics(*_a, **_k):
+        def fake_catalog_qa_metrics(*_a, **_k):
             return {
-                "catalog_qc_raw_ok": True,
-                "catalog_qc_raw_reason": "ok",
-                "catalog_qc_dewarped_ok": True,
-                "catalog_qc_dewarped_reason": "ok",
-                "catalog_qc_delta_median_arcsec": 0.0,
+                "catalog_qa_raw_ok": True,
+                "catalog_qa_raw_reason": "ok",
+                "catalog_qa_dewarped_ok": True,
+                "catalog_qa_dewarped_reason": "ok",
+                "catalog_qa_delta_median_arcsec": 0.0,
             }
 
         with mock.patch.object(mod, "calcflow", side_effect=fake_calcflow), mock.patch.object(
             mod, "fits_image", side_effect=fake_fits_image
         ), mock.patch.object(mod, "horizon_r_normalized", return_value=0.7), mock.patch.object(
-            mod, "catalog_astrometry_metrics_pair", side_effect=fake_catalog_qc_metrics
+            mod, "catalog_astrometry_metrics_pair", side_effect=fake_catalog_qa_metrics
         ):
             row = mod.evaluate_one(
                 spec,
@@ -376,17 +376,17 @@ class TestOptimizeCLI(unittest.TestCase):
                 w_struct=1.0,
                 w_qa=1.0,
                 soft_qa=False,
-                catalog_qc=True,
-                catalog_qc_max_sep_arcsec=300.0,
-                catalog_qc_min_matches=1,
-                catalog_qc_n_catalog_sources=1,
-                catalog_qc_n_measured_sources=1,
+                catalog_qa=True,
+                catalog_qa_max_sep_arcsec=300.0,
+                catalog_qa_min_matches=1,
+                catalog_qa_n_catalog_sources=1,
+                catalog_qa_n_measured_sources=1,
             )
 
         self.assertIsNone(row["error"])
-        self.assertIn("catalog_qc_raw_ok", row)
-        self.assertIn("catalog_qc_dewarped_ok", row)
-        self.assertIn("catalog_qc_delta_median_arcsec", row)
+        self.assertIn("catalog_qa_raw_ok", row)
+        self.assertIn("catalog_qa_dewarped_ok", row)
+        self.assertIn("catalog_qa_delta_median_arcsec", row)
 
 
 if __name__ == "__main__":

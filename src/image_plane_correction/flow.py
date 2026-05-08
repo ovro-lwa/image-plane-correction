@@ -36,7 +36,7 @@ PHASE2_SUBBANDS = [
 class Flow:
     offsets: Array
     direction: Direction
-    catalog_qc_metrics: Optional[MutableMapping[str, Any]] = None
+    catalog_qa_metrics: Optional[MutableMapping[str, Any]] = None
 
     def __init__(self, offsets, direction: Direction = "backwards"):
         self.offsets = offsets
@@ -262,10 +262,11 @@ def calcflow(
     cleaned=False,
     qa=True,
     write=False,
+    write_reference_sky: bool = False,
     outroot=None,
     catalog="VLSSR",
     max_flux=20,
-    catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
+    catalog_path="/home/claw/vlssr_radecpeak.txt",
     preprocess_weight=1.5,
     horizon_elevation_deg: Optional[float] = 10.0,
     alpha=1.3,
@@ -274,8 +275,8 @@ def calcflow(
     use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
-    catalog_qc: bool = False,
-    catalog_qc_params: Optional[Any] = None,
+    catalog_qa: bool = False,
+    catalog_qa_params: Optional[Any] = None,
     quality_metrics: Optional[MutableMapping[str, Any]] = None,
 ):
     """
@@ -296,10 +297,14 @@ def calcflow(
     sanitization as the image after it is built or supplied (e.g. NaNs from
     beam/WCS outside the physical sky).
 
-    Set ``catalog_qc=True`` to run catalog astrometry QC on raw vs dewarped images using
-    PyBDSF for source measurement (see :mod:`image_plane_correction.quality_checks`). Results are merged into ``quality_metrics``
-    when that mapping is provided; otherwise they are stored only on ``flow.catalog_qc_metrics``.
-    ``catalog_qc_params=None`` uses default thresholds (:class:`~image_plane_correction.quality_checks.CatalogAstrometryQCParams`).
+    Set ``catalog_qa=True`` to run catalog astrometry QA on raw vs dewarped images using
+    PyBDSF for source measurement (see :mod:`image_plane_correction.qa`). Results are merged into ``quality_metrics``
+    when that mapping is provided; otherwise they are stored only on ``flow.catalog_qa_metrics``.
+    ``catalog_qa_params=None`` uses default thresholds (:class:`~image_plane_correction.qa.CatalogAstrometryQAParams`).
+
+    Set ``write_reference_sky=True`` to write the reference sky map used for flow solving to
+    ``outroot`` using a filename suffix ``"_reference.fits"`` (gated by the same QA pass
+    condition as ``write=True`` output products).
     """
     from astropy.io import fits
     from astropy.wcs.utils import proj_plane_pixel_scales
@@ -307,7 +312,12 @@ def calcflow(
     from . import data
     from .catalogs import theoretical_sky_beam_function
     from .preprocessing import preprocess
-    from .quality_checks import CatalogAstrometryQCParams, bright_source_qa_kwargs, catalog_astrometry_metrics_pair, log_bright_source_alignment
+    from .qa import (
+        CatalogAstrometryQAParams,
+        bright_source_qa_kwargs,
+        catalog_astrometry_metrics_pair,
+        log_bright_source_alignment,
+    )
     from .util import runqa
 
     def _sanitize_finite_jax(arr, label: str):
@@ -492,14 +502,14 @@ def calcflow(
 
     qa_passed = bool(score == 1)
 
-    if catalog_qc:
+    if catalog_qa:
         sink: MutableMapping[str, Any] = quality_metrics if quality_metrics is not None else {}
         params = (
-            catalog_qc_params
-            if catalog_qc_params is not None
-            else CatalogAstrometryQCParams()
+            catalog_qa_params
+            if catalog_qa_params is not None
+            else CatalogAstrometryQAParams()
         )
-        qc_row = catalog_astrometry_metrics_pair(
+        qa_row = catalog_astrometry_metrics_pair(
             np.asarray(image),
             np.asarray(dewarped),
             imwcs,
@@ -508,23 +518,33 @@ def calcflow(
             image_fn,
             params,
         )
-        sink.update(qc_row)
-        flow.catalog_qc_metrics = sink
+        sink.update(qa_row)
+        flow.catalog_qa_metrics = sink
 
-    if write:
+    if write or write_reference_sky:
         if outroot is None:
-            raise ValueError("`outroot` must be provided when write=True")
+            raise ValueError("`outroot` must be provided when write=True or write_reference_sky=True")
         if (qa and qa_passed) or not qa:
-            outname = os.path.join(
-                outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
-            )
-            dewarped_arr = np.array(dewarped)
             # Preserve full input metadata and refresh WCS-related cards.
             output_header = input_header.copy()
             output_header.update(imwcs.to_header())
-            fits.writeto(outname, dewarped_arr, output_header)
+
+            if write:
+                outname = os.path.join(
+                    outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
+                )
+                dewarped_arr = np.array(dewarped)
+                fits.writeto(outname, dewarped_arr, output_header)
+
+            if write_reference_sky:
+                ref_outname = os.path.join(
+                    outroot, os.path.basename(image_fn.replace(".fits", "_reference.fits"))
+                )
+                reference_arr = np.asarray(reference_sky)
+                fits.writeto(ref_outname, reference_arr, output_header)
         else:
-            print(f"image {image_fn} failed qa. Not writing dewarped image.")
+            msg = f"image {image_fn} failed qa. Not writing outputs."
+            print(msg)
 
     return image, reference_sky, flow, dewarped, qa_passed
 
@@ -538,7 +558,7 @@ def flow_cascade73MHz(
     outroot=None,
     catalog="VLSSR",
     max_flux=20,
-    catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
+    catalog_path="/home/claw/vlssr_radecpeak.txt",
     preprocess_weight=1.5,
     alpha=1.3,
     gamma=150,

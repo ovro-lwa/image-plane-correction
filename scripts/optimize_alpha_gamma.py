@@ -18,7 +18,7 @@ Coarse search + composite objective (see ``--w-struct`` / ``--w-qa``)::
     PYTHONPATH=src python scripts/optimize_alpha_gamma.py --search \\
         --images obs.fits --cleaned --output-json metrics.json
 
-Optional catalog astrometry QC (raw vs dewarped) via ``--catalog-qc``; JSON schema is
+Optional catalog astrometry QA (raw vs dewarped) via ``--catalog-qa``; JSON schema is
 ``image_plane_correction.optimize_alpha_gamma.v4``.
 """
 
@@ -46,7 +46,7 @@ if str(_SRC) not in sys.path:
 from image_plane_correction.data import fits_image  # noqa: E402
 from image_plane_correction.flow import calcflow, horizon_r_normalized  # noqa: E402
 from image_plane_correction import flow_metrics  # noqa: E402
-from image_plane_correction.quality_checks import CatalogAstrometryQCParams, catalog_astrometry_metrics_pair  # noqa: E402
+from image_plane_correction.qa import CatalogAstrometryQAParams, catalog_astrometry_metrics_pair  # noqa: E402
 
 SCHEMA_VERSION = "image_plane_correction.optimize_alpha_gamma.v4"
 
@@ -245,18 +245,18 @@ def evaluate_one(
     w_struct: float = 1.0,
     w_qa: float = 1.0,
     soft_qa: bool = False,
-    catalog_qc: bool = False,
-    catalog_qc_bdsf_thresh: str | None = "hard",
-    catalog_qc_bdsf_thresh_isl: float = 20.0,
-    catalog_qc_bdsf_thresh_pix: float = 5.0,
-    catalog_qc_bdsf_minpix_isl: int | None = None,
-    catalog_qc_bdsf_ncores: int = 4,
-    catalog_qc_max_sep_arcsec: float = 120.0,
-    catalog_qc_min_matches: int = 5,
-    catalog_qc_n_catalog_sources: int = 50,
-    catalog_qc_n_measured_sources: int | None = None,
-    catalog_qc_bmaj_deg: float | None = None,
-    catalog_qc_bmin_deg: float | None = None,
+    catalog_qa: bool = False,
+    catalog_qa_bdsf_thresh: str | None = "hard",
+    catalog_qa_bdsf_thresh_isl: float = 20.0,
+    catalog_qa_bdsf_thresh_pix: float = 5.0,
+    catalog_qa_bdsf_minpix_isl: int | None = None,
+    catalog_qa_bdsf_ncores: int = 4,
+    catalog_qa_max_sep_arcsec: float = 120.0,
+    catalog_qa_min_matches: int = 5,
+    catalog_qa_n_catalog_sources: int = 50,
+    catalog_qa_n_measured_sources: int | None = None,
+    catalog_qa_bmaj_deg: float | None = None,
+    catalog_qa_bmin_deg: float | None = None,
     phase: str = "grid",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
@@ -319,19 +319,19 @@ def evaluate_one(
         row["qa_passed"] = bool(qa_passed)
         row["horizon_r"] = float(horizon_r)
 
-        if catalog_qc:
-            qc_params = CatalogAstrometryQCParams(
-                max_sep_arcsec=float(catalog_qc_max_sep_arcsec),
-                min_matches=int(catalog_qc_min_matches),
-                n_catalog_sources=int(catalog_qc_n_catalog_sources),
-                n_measured_sources=catalog_qc_n_measured_sources,
-                bmaj_deg=catalog_qc_bmaj_deg,
-                bmin_deg=catalog_qc_bmin_deg,
-                bdsf_thresh=catalog_qc_bdsf_thresh,
-                bdsf_thresh_isl=float(catalog_qc_bdsf_thresh_isl),
-                bdsf_thresh_pix=float(catalog_qc_bdsf_thresh_pix),
-                bdsf_minpix_isl=catalog_qc_bdsf_minpix_isl,
-                bdsf_ncores=int(catalog_qc_bdsf_ncores),
+        if catalog_qa:
+            qa_params = CatalogAstrometryQAParams(
+                max_sep_arcsec=float(catalog_qa_max_sep_arcsec),
+                min_matches=int(catalog_qa_min_matches),
+                n_catalog_sources=int(catalog_qa_n_catalog_sources),
+                n_measured_sources=catalog_qa_n_measured_sources,
+                bmaj_deg=catalog_qa_bmaj_deg,
+                bmin_deg=catalog_qa_bmin_deg,
+                bdsf_thresh=catalog_qa_bdsf_thresh,
+                bdsf_thresh_isl=float(catalog_qa_bdsf_thresh_isl),
+                bdsf_thresh_pix=float(catalog_qa_bdsf_thresh_pix),
+                bdsf_minpix_isl=catalog_qa_bdsf_minpix_isl,
+                bdsf_ncores=int(catalog_qa_bdsf_ncores),
             )
             row.update(
                 catalog_astrometry_metrics_pair(
@@ -341,7 +341,7 @@ def evaluate_one(
                     catalog,
                     catalog_path,
                     spec.image,
-                    qc_params,
+                    qa_params,
                 )
             )
 
@@ -354,7 +354,7 @@ def evaluate_one(
         row["qa_passed"] = False
         row["runqa_score"] = 0
         row["composite_objective"] = None
-        row["catalog_qc_delta_median_arcsec"] = None
+        row["catalog_qa_delta_median_arcsec"] = None
 
     return row
 
@@ -490,18 +490,18 @@ def _eval_kw(args: argparse.Namespace, band_deg: tuple[float, float]) -> dict[st
         "w_struct": float(args.w_struct),
         "w_qa": float(args.w_qa),
         "soft_qa": bool(args.soft_qa),
-        "catalog_qc": bool(args.catalog_qc),
-        "catalog_qc_bdsf_thresh": args.catalog_qc_bdsf_thresh,
-        "catalog_qc_bdsf_thresh_isl": float(args.catalog_qc_bdsf_thresh_isl),
-        "catalog_qc_bdsf_thresh_pix": float(args.catalog_qc_bdsf_thresh_pix),
-        "catalog_qc_bdsf_minpix_isl": args.catalog_qc_bdsf_minpix_isl,
-        "catalog_qc_bdsf_ncores": int(args.catalog_qc_bdsf_ncores),
-        "catalog_qc_max_sep_arcsec": float(args.catalog_qc_max_sep_arcsec),
-        "catalog_qc_min_matches": int(args.catalog_qc_min_matches),
-        "catalog_qc_n_catalog_sources": int(args.catalog_qc_n_catalog_sources),
-        "catalog_qc_n_measured_sources": args.catalog_qc_n_measured_sources,
-        "catalog_qc_bmaj_deg": args.catalog_qc_bmaj_deg,
-        "catalog_qc_bmin_deg": args.catalog_qc_bmin_deg,
+        "catalog_qa": bool(args.catalog_qa),
+        "catalog_qa_bdsf_thresh": args.catalog_qa_bdsf_thresh,
+        "catalog_qa_bdsf_thresh_isl": float(args.catalog_qa_bdsf_thresh_isl),
+        "catalog_qa_bdsf_thresh_pix": float(args.catalog_qa_bdsf_thresh_pix),
+        "catalog_qa_bdsf_minpix_isl": args.catalog_qa_bdsf_minpix_isl,
+        "catalog_qa_bdsf_ncores": int(args.catalog_qa_bdsf_ncores),
+        "catalog_qa_max_sep_arcsec": float(args.catalog_qa_max_sep_arcsec),
+        "catalog_qa_min_matches": int(args.catalog_qa_min_matches),
+        "catalog_qa_n_catalog_sources": int(args.catalog_qa_n_catalog_sources),
+        "catalog_qa_n_measured_sources": args.catalog_qa_n_measured_sources,
+        "catalog_qa_bmaj_deg": args.catalog_qa_bmaj_deg,
+        "catalog_qa_bmin_deg": args.catalog_qa_bmin_deg,
     }
 
 
@@ -667,71 +667,71 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--no-qa", action="store_false", dest="qa", help="Disable residual QA inside calcflow")
     p.add_argument("--quiet", action="store_true", help="Suppress calcflow/processing stdout")
     p.add_argument(
-        "--catalog-qc",
+        "--catalog-qa",
         action="store_true",
-        help="Compute catalog-based astrometry QC metrics (raw + dewarped) per evaluation",
+        help="Compute catalog-based astrometry QA metrics (raw + dewarped) per evaluation",
     )
     p.add_argument(
-        "--catalog-qc-bdsf-thresh",
+        "--catalog-qa-bdsf-thresh",
         choices=("auto", "hard", "fdr"),
         default="hard",
-        help="PyBDSF thresh mode for catalog QC (auto: let PyBDSF choose).",
+        help="PyBDSF thresh mode for catalog QA (auto: let PyBDSF choose).",
     )
     p.add_argument(
-        "--catalog-qc-bdsf-thresh-isl",
+        "--catalog-qa-bdsf-thresh-isl",
         type=float,
         default=20.0,
         help="PyBDSF island detection threshold in sigma.",
     )
     p.add_argument(
-        "--catalog-qc-bdsf-thresh-pix",
+        "--catalog-qa-bdsf-thresh-pix",
         type=float,
         default=5.0,
         help="PyBDSF pixel peak threshold in sigma.",
     )
     p.add_argument(
-        "--catalog-qc-bdsf-minpix-isl",
+        "--catalog-qa-bdsf-minpix-isl",
         type=int,
         default=None,
         help="PyBDSF minimum island size in pixels (default: PyBDSF internal estimate).",
     )
     p.add_argument(
-        "--catalog-qc-bdsf-ncores",
+        "--catalog-qa-bdsf-ncores",
         type=int,
         default=4,
         help="PyBDSF parallel worker count (passed as ncores to process_image).",
     )
     p.add_argument(
-        "--catalog-qc-max-sep-arcsec",
+        "--catalog-qa-max-sep-arcsec",
         type=float,
         default=120.0,
-        help="Max angular separation (arcsec) to count a match in catalog QC",
+        help="Max angular separation (arcsec) to count a match in catalog QA",
     )
     p.add_argument(
-        "--catalog-qc-min-matches",
+        "--catalog-qa-min-matches",
         type=int,
         default=5,
-        help="Minimum matches needed for catalog QC ok=True",
+        help="Minimum matches needed for catalog QA ok=True",
     )
     p.add_argument(
-        "--catalog-qc-n-catalog-sources",
+        "--catalog-qa-n-catalog-sources",
         type=int,
         default=50,
         help="Number of reference catalog sources to compare against",
     )
     p.add_argument(
-        "--catalog-qc-n-measured-sources",
+        "--catalog-qa-n-measured-sources",
         type=int,
         default=None,
         help="Max PyBDSF Gaussian components to retain after deduplication (default: equals catalog used)",
     )
     p.add_argument(
-        "--catalog-qc-beam-deg",
+        "--catalog-qa-beam-deg",
         type=str,
         default=None,
         metavar="BMAJ,BMIN",
         help=(
-            "Beam major/minor FWHM in degrees for PyBDSF catalog QC "
+            "Beam major/minor FWHM in degrees for PyBDSF catalog QA "
             "(overrides BMAJ/BMIN from image FITS header)"
         ),
     )
@@ -748,14 +748,14 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     args = p.parse_args(list(argv) if argv is not None else None)
 
-    args.catalog_qc_bmaj_deg = None
-    args.catalog_qc_bmin_deg = None
-    if args.catalog_qc_beam_deg:
-        parts = [x.strip() for x in str(args.catalog_qc_beam_deg).split(",")]
+    args.catalog_qa_bmaj_deg = None
+    args.catalog_qa_bmin_deg = None
+    if args.catalog_qa_beam_deg:
+        parts = [x.strip() for x in str(args.catalog_qa_beam_deg).split(",")]
         if len(parts) != 2:
-            raise SystemExit("--catalog-qc-beam-deg must be two comma-separated floats: BMAJ,BMIN (degrees).")
-        args.catalog_qc_bmaj_deg = float(parts[0])
-        args.catalog_qc_bmin_deg = float(parts[1])
+            raise SystemExit("--catalog-qa-beam-deg must be two comma-separated floats: BMAJ,BMIN (degrees).")
+        args.catalog_qa_bmaj_deg = float(parts[0])
+        args.catalog_qa_bmin_deg = float(parts[1])
 
     if args.search and (args.alphas or args.gammas):
         raise SystemExit("Use either --search or explicit --alphas/--gammas, not both.")
@@ -867,17 +867,17 @@ def main(argv: Sequence[str] | None = None) -> None:
             "refine_maxiter": args.refine_maxiter,
             "catalog": args.catalog,
             "catalog_path": args.catalog_path,
-            "catalog_qc": bool(args.catalog_qc),
-            "catalog_qc_bdsf_thresh": args.catalog_qc_bdsf_thresh,
-            "catalog_qc_bdsf_thresh_isl": float(args.catalog_qc_bdsf_thresh_isl),
-            "catalog_qc_bdsf_thresh_pix": float(args.catalog_qc_bdsf_thresh_pix),
-            "catalog_qc_bdsf_minpix_isl": args.catalog_qc_bdsf_minpix_isl,
-            "catalog_qc_bdsf_ncores": int(args.catalog_qc_bdsf_ncores),
-            "catalog_qc_max_sep_arcsec": float(args.catalog_qc_max_sep_arcsec),
-            "catalog_qc_min_matches": int(args.catalog_qc_min_matches),
-            "catalog_qc_n_catalog_sources": int(args.catalog_qc_n_catalog_sources),
-            "catalog_qc_n_measured_sources": args.catalog_qc_n_measured_sources,
-            "catalog_qc_beam_deg": args.catalog_qc_beam_deg,
+            "catalog_qa": bool(args.catalog_qa),
+            "catalog_qa_bdsf_thresh": args.catalog_qa_bdsf_thresh,
+            "catalog_qa_bdsf_thresh_isl": float(args.catalog_qa_bdsf_thresh_isl),
+            "catalog_qa_bdsf_thresh_pix": float(args.catalog_qa_bdsf_thresh_pix),
+            "catalog_qa_bdsf_minpix_isl": args.catalog_qa_bdsf_minpix_isl,
+            "catalog_qa_bdsf_ncores": int(args.catalog_qa_bdsf_ncores),
+            "catalog_qa_max_sep_arcsec": float(args.catalog_qa_max_sep_arcsec),
+            "catalog_qa_min_matches": int(args.catalog_qa_min_matches),
+            "catalog_qa_n_catalog_sources": int(args.catalog_qa_n_catalog_sources),
+            "catalog_qa_n_measured_sources": args.catalog_qa_n_measured_sources,
+            "catalog_qa_beam_deg": args.catalog_qa_beam_deg,
             "bootstrap": args.bootstrap,
             "seed": args.seed,
             "min_qa_rate": args.min_qa_rate,

@@ -1,5 +1,5 @@
 """
-Structured quality checks for dewarped vs raw images (catalog astrometry, logging helpers).
+Structured quality assurance (QA) for dewarped vs raw images (catalog astrometry, logging helpers).
 
 Use from :func:`~image_plane_correction.flow.calcflow` or from tuning harnesses;
 keep imaging logic in ``source_detection`` / ``util.runqa``.
@@ -15,7 +15,7 @@ import numpy as np
 from . import source_detection
 
 
-def beam_fwhm_deg_for_catalog_qc(
+def beam_fwhm_deg_for_catalog_qa(
     image_fn: str,
     *,
     bmaj_deg_override: float | None,
@@ -29,8 +29,8 @@ def beam_fwhm_deg_for_catalog_qc(
     hdr = fits.getheader(image_fn)
     if "BMAJ" not in hdr or "BMIN" not in hdr:
         raise ValueError(
-            "catalog QC requires BMAJ/BMIN in the image FITS header, or beam overrides "
-            "(degrees) via CatalogAstrometryQCParams / --catalog-qc-beam-deg."
+            "catalog QA requires BMAJ/BMIN in the image FITS header, or beam overrides "
+            "(degrees) via CatalogAstrometryQAParams / --catalog-qa-beam-deg."
         )
     return float(hdr["BMAJ"]), float(hdr["BMIN"])
 
@@ -49,10 +49,10 @@ def _attach_prefixed(target: MutableMapping[str, Any], prefix: str, d: Mapping[s
 
 
 @dataclass
-class CatalogAstrometryQCParams:
+class CatalogAstrometryQAParams:
     """Parameters for :func:`catalog_astrometry_metrics_pair` (PyBDSF-based measurement)."""
 
-    max_sep_arcsec: float = 120.0
+    max_sep_arcsec: float = 600.0
     min_matches: int = 5
     n_catalog_sources: int = 50
     n_measured_sources: int | None = None
@@ -63,7 +63,7 @@ class CatalogAstrometryQCParams:
     bmin_deg: float | None = None
     beam_pa_deg: float = 0.0
     bdsf_thresh: str | None = "hard"
-    bdsf_thresh_isl: float = 20.0
+    bdsf_thresh_isl: float = 10.0
     bdsf_thresh_pix: float = 5.0
     bdsf_minpix_isl: int | None = None
     bdsf_quiet: bool = True
@@ -81,16 +81,16 @@ def catalog_astrometry_metrics_pair(
     catalog: CatalogLike,
     catalog_path: str | None,
     image_fn: str,
-    params: CatalogAstrometryQCParams | None = None,
+    params: CatalogAstrometryQAParams | None = None,
 ) -> dict[str, Any]:
     """
-    Run catalog astrometry QC on raw and dewarped images; return flat metrics for JSON rows.
+    Run catalog astrometry QA on raw and dewarped images; return flat metrics for JSON rows.
 
-    Keys match the tuning harness: ``catalog_qc_raw_*``, ``catalog_qc_dewarped_*``,
-    ``catalog_qc_delta_median_arcsec``.
+    Keys match the tuning harness: ``catalog_qa_raw_*``, ``catalog_qa_dewarped_*``,
+    ``catalog_qa_delta_median_arcsec``.
     """
-    p = params or CatalogAstrometryQCParams()
-    beam_deg = beam_fwhm_deg_for_catalog_qc(
+    p = params or CatalogAstrometryQAParams()
+    beam_deg = beam_fwhm_deg_for_catalog_qa(
         image_fn,
         bmaj_deg_override=p.bmaj_deg,
         bmin_deg_override=p.bmin_deg,
@@ -117,22 +117,27 @@ def catalog_astrometry_metrics_pair(
         restfreq_hz=p.restfreq_hz,
         bdsf_ncores=int(p.bdsf_ncores),
     )
-    raw_qc = source_detection.catalog_astrometry_qc(np.asarray(image_raw), **common_kw)
-    dew_qc = source_detection.catalog_astrometry_qc(np.asarray(image_dewarped), **common_kw)
+    raw_qa = source_detection.catalog_astrometry_qa(np.asarray(image_raw), **common_kw)
+    dew_qa = source_detection.catalog_astrometry_qa(np.asarray(image_dewarped), **common_kw)
 
     out: dict[str, Any] = {}
-    _attach_prefixed(out, "catalog_qc_raw_", dict(raw_qc))
-    _attach_prefixed(out, "catalog_qc_dewarped_", dict(dew_qc))
+    _attach_prefixed(out, "catalog_qa_raw_", dict(raw_qa))
+    _attach_prefixed(out, "catalog_qa_dewarped_", dict(dew_qa))
 
-    if bool(raw_qc.get("ok")) and bool(dew_qc.get("ok")):
-        raw_med = raw_qc.get("median_arcsec")
-        dew_med = dew_qc.get("median_arcsec")
-        if raw_med is not None and dew_med is not None and np.isfinite(float(raw_med)) and np.isfinite(float(dew_med)):
-            out["catalog_qc_delta_median_arcsec"] = float(raw_med) - float(dew_med)
+    if bool(raw_qa.get("ok")) and bool(dew_qa.get("ok")):
+        raw_med = raw_qa.get("median_arcsec")
+        dew_med = dew_qa.get("median_arcsec")
+        if (
+            raw_med is not None
+            and dew_med is not None
+            and np.isfinite(float(raw_med))
+            and np.isfinite(float(dew_med))
+        ):
+            out["catalog_qa_delta_median_arcsec"] = float(raw_med) - float(dew_med)
         else:
-            out["catalog_qc_delta_median_arcsec"] = None
+            out["catalog_qa_delta_median_arcsec"] = None
     else:
-        out["catalog_qc_delta_median_arcsec"] = None
+        out["catalog_qa_delta_median_arcsec"] = None
     return out
 
 
@@ -161,3 +166,4 @@ def log_bright_source_alignment(dewarped: Any, **kwargs: Any) -> None:
     from .util import log_bright_source_flux_comparison
 
     log_bright_source_flux_comparison(dewarped, **kwargs)
+

@@ -47,23 +47,23 @@ metrics, ``composite_objective`` (structure score plus QA weighting), and an agg
 then lower in-band curl/div ratio). Use ``--alphas`` / ``--gammas`` for a fixed small grid
 instead of ``--search`` when you already know candidates.
 
-Optional **catalog astrometry QC** compares **PyBDSF**-measured sources in the **raw** and **dewarped**
+Optional **catalog astrometry QA** compares **PyBDSF**-measured sources in the **raw** and **dewarped**
 images to your reference catalog (same ``--catalog`` / ``--catalog-path`` as ``calcflow``).
-Rows gain prefixed keys such as ``catalog_qc_raw_median_arcsec``,
-``catalog_qc_dewarped_median_arcsec``, and ``catalog_qc_delta_median_arcsec`` when enabled:
+Rows gain prefixed keys such as ``catalog_qa_raw_median_arcsec``,
+``catalog_qa_dewarped_median_arcsec``, and ``catalog_qa_delta_median_arcsec`` when enabled:
 
 ```bash
 PYTHONPATH=src python scripts/optimize_alpha_gamma.py --search \
   --images path/to/image.fits --psf path/to/psf.fits \
-  --catalog-qc \
+  --catalog-qa \
   --catalog VLSSR --catalog-path /path/to/catalog.txt \
   --output-json tuning_results.json
 ```
 
-Beam major/minor FWHM in degrees are required for PyBDSF (from ``BMAJ`` / ``BMIN`` in the image FITS header or ``--catalog-qc-beam-deg BMAJ,BMIN``). Optional tuning flags include ``--catalog-qc-bdsf-thresh`` (``hard``, ``fdr``, or ``auto``), ``--catalog-qc-bdsf-thresh-isl``, ``--catalog-qc-bdsf-thresh-pix``, ``--catalog-qc-bdsf-minpix-isl``, and ``--catalog-qc-bdsf-ncores`` (default 4).
+Beam major/minor FWHM in degrees are required for PyBDSF (from ``BMAJ`` / ``BMIN`` in the image FITS header or ``--catalog-qa-beam-deg BMAJ,BMIN``). Optional tuning flags include ``--catalog-qa-bdsf-thresh`` (``hard``, ``fdr``, or ``auto``), ``--catalog-qa-bdsf-thresh-isl``, ``--catalog-qa-bdsf-thresh-pix``, ``--catalog-qa-bdsf-minpix-isl``, and ``--catalog-qa-bdsf-ncores`` (default 4).
 
-Shared implementations live in ``image_plane_correction.quality_checks`` (catalog astrometry
+Shared implementations live in ``image_plane_correction.qa`` (catalog astrometry
 metrics and bright-source logging helpers). The tuning script calls these automatically when
-you pass ``--catalog-qc``. From Python you can run ``calcflow(..., catalog_qc=True)`` with
-default ``catalog_qc_params=None`` (uses :class:`~image_plane_correction.quality_checks.CatalogAstrometryQCParams`).
-Metrics are stored on ``flow.catalog_qc_metrics``; optionally pass ``quality_metrics={}`` to merge the same keys into your dict as well.
+you pass ``--catalog-qa``. From Python you can run ``calcflow(..., catalog_qa=True)`` with
+default ``catalog_qa_params=None`` (uses :class:`~image_plane_correction.qa.CatalogAstrometryQAParams`).
+Metrics are stored on ``flow.catalog_qa_metrics``; optionally pass ``quality_metrics={}`` to merge the same keys into your dict as well.

@@ -78,7 +78,7 @@ class TestSkyMatching(unittest.TestCase):
         stats = sd.summarize_angular_separations_deg(sep_deg)
         self.assertLess(stats["p90_arcsec"], 120.0)
 
-    def test_catalog_astrometry_qc_smoke(self):
+    def test_catalog_astrometry_qa_smoke(self):
         n = 256
         wcs = _wcs_tan(n, cdelt_arcsec=4.0)
 
@@ -93,7 +93,7 @@ class TestSkyMatching(unittest.TestCase):
         image = _gaussian_sources_image(n, cat_xy, sigma_px=6.0, peak_amp=100.0)
 
         beam_deg = (18.0 / 3600.0, 15.0 / 3600.0)
-        out = sd.catalog_astrometry_qc(
+        out = sd.catalog_astrometry_qa(
             image,
             imwcs=wcs,
             catalog=cat_xy,
@@ -113,7 +113,7 @@ class TestSkyMatching(unittest.TestCase):
         self.assertEqual(out["n_matched"], 3)
         self.assertLess(out["p90_arcsec"], 300.0)
 
-    def test_catalog_astrometry_qc_ignores_nan_pixels(self):
+    def test_catalog_astrometry_qa_ignores_nan_pixels(self):
         n = 256
         wcs = _wcs_tan(n, cdelt_arcsec=4.0)
 
@@ -132,7 +132,7 @@ class TestSkyMatching(unittest.TestCase):
         image[100:105, 200:210] = np.nan
 
         beam_deg = (18.0 / 3600.0, 15.0 / 3600.0)
-        out = sd.catalog_astrometry_qc(
+        out = sd.catalog_astrometry_qa(
             image,
             imwcs=wcs,
             catalog=cat_xy,

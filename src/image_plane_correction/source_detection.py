@@ -475,7 +475,7 @@ def identify_sources_bdsf(
     n_sources_max: int | None = None,
     min_separation_px: float = 0.0,
     thresh: str | None = "hard",
-    thresh_isl: float = 20.0,
+    thresh_isl: float = 10.0,
     thresh_pix: float = 5.0,
     minpix_isl: int | None = None,
     quiet: bool = True,
@@ -626,7 +626,7 @@ def summarize_angular_separations_deg(sep_deg: np.ndarray) -> Mapping[str, float
     }
 
 
-def catalog_astrometry_qc(
+def catalog_astrometry_qa(
     image: np.ndarray,
     *,
     imwcs: Any,
@@ -639,10 +639,10 @@ def catalog_astrometry_qc(
     beam_fwhm_deg: tuple[float | None, float | None] = (None, None),
     beam_pa_deg: float = 0.0,
     pointlike_axis_ratio_max: float = 1.8,
-    max_sep_arcsec: float = 120.0,
+    max_sep_arcsec: float = 600.0,
     min_matches: int = 5,
     bdsf_thresh: str | None = "hard",
-    bdsf_thresh_isl: float = 20.0,
+    bdsf_thresh_isl: float = 10.0,
     bdsf_thresh_pix: float = 5.0,
     bdsf_minpix_isl: int | None = None,
     bdsf_quiet: bool = True,
@@ -650,7 +650,7 @@ def catalog_astrometry_qc(
     bdsf_ncores: int = 4,
 ) -> MutableMapping[str, Any]:
     """
-    End-to-end catalog-based astrometric QC using PyBDSF for source measurement.
+    End-to-end catalog-based astrometric QA using PyBDSF for source measurement.
 
     Steps:
     1) Load reference catalog and filter to image footprint.
@@ -721,7 +721,7 @@ def catalog_astrometry_qc(
 
     bmaj_deg, bmin_deg = beam_fwhm_deg
     if bmaj_deg is None or bmin_deg is None:
-        raise ValueError("catalog_astrometry_qc requires beam_fwhm_deg=(bmaj_deg, bmin_deg) in degrees.")
+        raise ValueError("catalog_astrometry_qa requires beam_fwhm_deg=(bmaj_deg, bmin_deg) in degrees.")
 
     measured_xy = detect_sources_bdsf_xy(
         z,
