@@ -21,7 +21,11 @@ def fits_image(path: str) -> Tuple[Array, wcs.WCS]:
     if image_np.dtype.byteorder in (">", "!"):
         image_np = image_np.byteswap().view(image_np.dtype.newbyteorder("="))
     image_data = jnp.array(image_np)
-    imwcs = wcs.WCS(image[0].header, naxis=2)
+    # Many OVRO-LWA products have extra non-celestial axes (e.g. STOKES/FREQ) even when the
+    # image data is effectively 2D after squeezing. Always return a 2D celestial WCS so
+    # downstream code (skycoord_to_pixel, pixel_to_skycoord, beam maps) behaves consistently.
+    full_wcs = wcs.WCS(image[0].header)
+    imwcs = full_wcs.celestial
     image.close()
     return image_data, imwcs
 

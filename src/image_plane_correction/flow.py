@@ -254,6 +254,60 @@ def horizon_r_normalized(
     return float(np.clip(r, 0.0, 1.0))
 
 
+def cleaned_psf_from_fits(
+    fits_path: str,
+    *,
+    shape: tuple[int, int] | None = None,
+) -> Array:
+    """
+    Build a synthetic, normalized PSF image from FITS beam metadata.
+
+    This is intended for "cleaned" images where you have beam FWHM values in the FITS header
+    (``BMAJ``/``BMIN`` in degrees), and want a compact PSF image to feed into
+    :func:`~image_plane_correction.catalogs.theoretical_sky_beam_function`.
+
+    If ``shape`` is not provided, it is inferred from the header as ``(NAXIS2, NAXIS1)``.
+    """
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from astropy.wcs.utils import proj_plane_pixel_scales
+
+    header = fits.getheader(fits_path)
+    if "BMAJ" not in header or "BMIN" not in header:
+        raise KeyError(f"Expected BMAJ/BMIN in FITS header for cleaned mode: {fits_path}")
+
+    imwcs = WCS(header).celestial
+
+    if shape is None:
+        if "NAXIS1" not in header or "NAXIS2" not in header:
+            raise KeyError(
+                f"Expected NAXIS1/NAXIS2 in FITS header to infer PSF shape: {fits_path}"
+            )
+        shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
+
+    bmaj_deg = float(header["BMAJ"])
+    bmin_deg = float(header["BMIN"])
+    if bmaj_deg <= 0 or bmin_deg <= 0:
+        raise ValueError(f"BMAJ/BMIN must be positive in FITS header for cleaned mode: {fits_path}")
+
+    pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
+    if pixel_scales.shape[0] < 2:
+        raise ValueError(f"Could not derive 2D pixel scales from WCS for: {fits_path}")
+    sigma_y = (bmaj_deg / pixel_scales[1]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    sigma_x = (bmin_deg / pixel_scales[0]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+
+    h, w = shape
+    yy, xx = np.indices((h, w), dtype=np.float64)
+    cy = (h - 1) / 2.0
+    cx = (w - 1) / 2.0
+    gaussian = np.exp(-0.5 * (((yy - cy) / sigma_y) ** 2 + ((xx - cx) / sigma_x) ** 2))
+    peak = gaussian.max()
+    if peak <= 0:
+        raise ValueError(f"Generated cleaned PSF has non-positive peak for: {fits_path}")
+    gaussian = gaussian / peak
+    return jnp.array(gaussian)
+
+
 def calcflow(
     image_fn,
     psf_fn=None,
@@ -316,6 +370,7 @@ def calcflow(
         CatalogAstrometryQAParams,
         bright_source_qa_kwargs,
         catalog_astrometry_metrics_pair,
+        check_reference_sky,
         log_bright_source_alignment,
     )
     from .util import runqa
@@ -369,48 +424,10 @@ def calcflow(
             reference_sky, os.path.basename(reference_sky_fn)
         )
 
-    def _cleaned_psf_from_header(header_path, shape):
-        header = fits.getheader(header_path)
-        if "BMAJ" not in header or "BMIN" not in header:
-            raise KeyError(
-                f"Expected BMAJ/BMIN in FITS header for cleaned mode: {header_path}"
-            )
-
-        bmaj_deg = float(header["BMAJ"])
-        bmin_deg = float(header["BMIN"])
-        if bmaj_deg <= 0 or bmin_deg <= 0:
-            raise ValueError(
-                f"BMAJ/BMIN must be positive in FITS header for cleaned mode: {header_path}"
-            )
-
-        # FITS beam sizes are FWHM in degrees; convert to pixel-space sigma.
-        pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
-        if pixel_scales.shape[0] < 2:
-            raise ValueError(f"Could not derive 2D pixel scales from WCS for: {image_fn}")
-        sigma_y = (bmaj_deg / pixel_scales[1]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-        sigma_x = (bmin_deg / pixel_scales[0]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-
-        h, w = shape
-        yy, xx = np.indices((h, w), dtype=np.float64)
-        cy = (h - 1) / 2.0
-        cx = (w - 1) / 2.0
-        gaussian = np.exp(
-            -0.5 * (((yy - cy) / sigma_y) ** 2 + ((xx - cx) / sigma_x) ** 2)
-        )
-        peak = gaussian.max()
-        if peak <= 0:
-            raise ValueError(
-                f"Generated cleaned PSF has non-positive peak for: {header_path}"
-            )
-        gaussian = gaussian / peak
-        return jnp.array(gaussian)
-
     if cleaned:
         # Cleaned images use beam metadata from FITS headers and do not require
         # deriving/reading a matching PSF image by filename.
         if psf_fn is not None:
-            with fits.open(psf_fn, memmap=True) as hdul:
-                psf_shape = hdul[0].data.squeeze().shape
             header_path = psf_fn
         else:
             # Build a compact synthetic PSF kernel from beam sizes in the image header.
@@ -430,7 +447,10 @@ def calcflow(
             size = max(9, 2 * radius + 1)
             psf_shape = (size, size)
             header_path = image_fn
-        psf = _cleaned_psf_from_header(header_path, psf_shape)
+        psf = cleaned_psf_from_fits(
+            header_path,
+            shape=psf_shape if psf_fn is None else None,
+        )
     elif psf_fn is not None:
         psf, _ = data.fits_image(psf_fn)
 
@@ -461,6 +481,9 @@ def calcflow(
             "image and reference_sky must have the same shape: "
             f"{np.asarray(image).shape} vs {np.asarray(reference_sky).shape}"
         )
+
+    # Validate reference sky before it is used for preprocessing / flow solving.
+    check_reference_sky(reference_sky, label="reference_sky")
 
     n_img = int(np.asarray(image).shape[0])
     horizon_r = horizon_r_normalized(imwcs, n=n_img, horizon_elevation_deg=horizon_elevation_deg)

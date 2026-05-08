@@ -61,17 +61,29 @@ def theoretical_sky(
     ignore_positions = jnp.isnan(positions_xy).any(axis=1)
     fluxes = fluxes[~ignore_positions]
     positions_xy = positions_xy[~ignore_positions]
+    positions = positions[~np.asarray(ignore_positions)]
 
     # scale pixel values to right location (if input imwcs is for larger image than img_size)
     scale = img_size / imwcs.pixel_shape[0]
     positions_xy = positions_xy * scale
+
+    # Filter out sources that fall outside the image after scaling.
+    in_bounds = (
+        (positions_xy[:, 0] >= 0)
+        & (positions_xy[:, 0] < img_size)
+        & (positions_xy[:, 1] >= 0)
+        & (positions_xy[:, 1] < img_size)
+    )
+    fluxes = fluxes[in_bounds]
+    positions_xy = positions_xy[in_bounds]
+    positions = positions[np.asarray(in_bounds)]
 
     # clip maximum flux (since PSF * large flux tends to overwhelm the image)
     fluxes = jnp.clip(fluxes, 0, max_flux)
 
     # compute beam function (flux falling off towards edge of image)
     zenith = pixel_to_skycoord(img_size // 2, img_size // 2, imwcs)
-    beam_function = jnp.cos(zenith.separation(positions[~ignore_positions]).rad) ** 1.6
+    beam_function = jnp.cos(zenith.separation(positions).rad) ** 1.6
 
     # compute sub-pixel area for each source, assuming samples to be located
     # at the center of each pixel
@@ -182,10 +194,21 @@ def theoretical_sky_beam_function(
     ignore_positions = jnp.isnan(positions_xy).any(axis=1)
     fluxes = fluxes[~ignore_positions]
     positions_xy = positions_xy[~ignore_positions]
+    positions = positions[~np.asarray(ignore_positions)]
 
     # scale pixel values to right location (if input imwcs is for larger image than img_size)
     scale = img_size / imwcs.pixel_shape[0]
     positions_xy = positions_xy * scale
+
+    in_bounds = (
+        (positions_xy[:, 0] >= 0)
+        & (positions_xy[:, 0] < img_size)
+        & (positions_xy[:, 1] >= 0)
+        & (positions_xy[:, 1] < img_size)
+    )
+    fluxes = fluxes[in_bounds]
+    positions_xy = positions_xy[in_bounds]
+    positions = positions[np.asarray(in_bounds)]
 
     # clip maximum flux (since PSF * large flux tends to overwhelm the image)
     fluxes = jnp.clip(fluxes, 0, max_flux)

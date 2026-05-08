@@ -8,11 +8,65 @@ keep imaging logic in ``source_detection`` / ``util.runqa``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Mapping, MutableMapping, Union
 
 import numpy as np
 
 from . import source_detection
+
+logger = logging.getLogger(__name__)
+
+
+def check_reference_sky(reference_sky: Any, *, label: str = "reference_sky") -> dict[str, Any]:
+    """
+    Validate the reference sky image before it is used for flow solving.
+
+    Fails fast if the map contains any non-finite values or if it is entirely zeros.
+    Returns a small summary dict and logs a one-line summary at INFO level.
+    """
+    arr = np.asarray(reference_sky)
+    if arr.size == 0:
+        raise ValueError(f"{label} is empty.")
+
+    finite = np.isfinite(arr)
+    finite_frac = float(np.mean(finite))
+    if finite_frac < 1.0:
+        n_bad = int(arr.size - int(np.count_nonzero(finite)))
+        raise ValueError(f"{label} contains non-finite values (n_bad={n_bad}, finite_frac={finite_frac:.6f}).")
+
+    nonzero = arr != 0
+    nonzero_frac = float(np.mean(nonzero))
+    if nonzero_frac == 0.0:
+        raise ValueError(f"{label} is all zeros (shape={arr.shape}).")
+
+    mn = float(np.min(arr))
+    mx = float(np.max(arr))
+    mean = float(np.mean(arr))
+    std = float(np.std(arr))
+    summary = {
+        "shape": tuple(int(x) for x in arr.shape),
+        "dtype": str(arr.dtype),
+        "finite_frac": finite_frac,
+        "nonzero_frac": nonzero_frac,
+        "min": mn,
+        "max": mx,
+        "mean": mean,
+        "std": std,
+    }
+    logger.info(
+        "QA %s: shape=%s dtype=%s finite_frac=%.6f nonzero_frac=%.6f min=%.6g max=%.6g mean=%.6g std=%.6g",
+        label,
+        summary["shape"],
+        summary["dtype"],
+        finite_frac,
+        nonzero_frac,
+        mn,
+        mx,
+        mean,
+        std,
+    )
+    return summary
 
 
 def beam_fwhm_deg_for_catalog_qa(
