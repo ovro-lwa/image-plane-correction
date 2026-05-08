@@ -215,7 +215,7 @@ def band_power_from_field(
 def structure_score(
     offsets: Union[ArrayLike, Any],
     imwcs: WCS,
-    band_deg: Tuple[float, float] = (20.0, 100.0),
+    band_deg: Tuple[float, float] = (10.0, 160.0),
     mask: np.ndarray | None = None,
     eps: float = 1e-18,
 ) -> MutableMapping[str, Any]:
