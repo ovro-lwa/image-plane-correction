@@ -396,6 +396,44 @@ def _reference_as_hdu(reference, *, fallback_wcs):
     return fits.PrimaryHDU(data=data, header=fallback_wcs.to_header())
 
 
+def _strip_extra_axis_cards(header, max_axis: int = 2) -> None:
+    """
+    In-place: remove ``NAXISn`` and per-axis WCS cards for ``n > max_axis``.
+
+    Many radio FITS products carry 4-axis WCS metadata (e.g. STOKES, FREQ on axes
+    3 and 4) while the image data we operate on is 2D. The celestial WCS we write
+    only covers axes 1-2, so leftover cards for the higher axes trigger
+    ``VerifyError`` when astropy writes the output. This helper scrubs them.
+    """
+    import re
+
+    single_axis_re = re.compile(
+        r"^(NAXIS|CTYPE|CRVAL|CRPIX|CDELT|CUNIT|CROTA|CNAME|CRDER|CSYER)(\d+)$"
+    )
+    matrix_re = re.compile(r"^(CD|PC)(\d+)_(\d+)$")
+    pv_ps_re = re.compile(r"^(PV|PS)(\d+)_(\d+)$")
+
+    to_delete: list[str] = []
+    for key in header:
+        m = single_axis_re.match(key)
+        if m and int(m.group(2)) > max_axis:
+            to_delete.append(key)
+            continue
+        m = matrix_re.match(key)
+        if m and (int(m.group(2)) > max_axis or int(m.group(3)) > max_axis):
+            to_delete.append(key)
+            continue
+        m = pv_ps_re.match(key)
+        if m and int(m.group(2)) > max_axis:
+            to_delete.append(key)
+            continue
+    for key in to_delete:
+        try:
+            del header[key]
+        except KeyError:  # pragma: no cover - already gone
+            pass
+
+
 def calcflow(
     image_fn,
     psf_fn=None,
@@ -411,8 +449,8 @@ def calcflow(
     catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
     preprocess_weight=1.5,
     horizon_elevation_deg: Optional[float] = 10.0,
-    alpha=1.1,
-    gamma=125,
+    alpha=1.3,
+    gamma=150,
     scale_factor=0.7,
     use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
@@ -746,7 +784,11 @@ def calcflow(
         if (qa and qa_passed) or not qa:
             # Preserve full input metadata and refresh WCS-related cards. If we
             # reprojected onto a target grid, NAXIS1/NAXIS2 must match the new shape.
+            # Strip leftover NAXISn / WCS cards for axes >2 because the data we write
+            # is always 2D after squeezing (radio FITS often carries STOKES/FREQ on
+            # axes 3/4 which astropy's verify will reject when NAXIS=2).
             output_header = input_header.copy()
+            _strip_extra_axis_cards(output_header, max_axis=2)
             output_header.update(imwcs.to_header())
             out_shape = np.asarray(dewarped).shape
             output_header["NAXIS"] = 2
@@ -783,8 +825,8 @@ def flow_cascade73MHz(
     max_flux=20,
     catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
     preprocess_weight=1.5,
-    alpha=1.1,
-    gamma=125,
+    alpha=1.3,
+    gamma=150,
     scale_factor=0.7,
     use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
