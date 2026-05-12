@@ -254,45 +254,30 @@ def horizon_r_normalized(
     return float(np.clip(r, 0.0, 1.0))
 
 
-def cleaned_psf_from_fits(
-    fits_path: str,
-    *,
-    shape: tuple[int, int] | None = None,
+def _synth_cleaned_psf_kernel(
+    bmaj_deg: float,
+    bmin_deg: float,
+    imwcs,
+    shape: tuple[int, int],
 ) -> Array:
     """
-    Build a synthetic, normalized PSF image from FITS beam metadata.
+    Build a synthetic, normalized cleaned-PSF kernel from beam metadata and a WCS.
 
-    This is intended for "cleaned" images where you have beam FWHM values in the FITS header
-    (``BMAJ``/``BMIN`` in degrees), and want a compact PSF image to feed into
-    :func:`~image_plane_correction.catalogs.theoretical_sky_beam_function`.
-
-    If ``shape`` is not provided, it is inferred from the header as ``(NAXIS2, NAXIS1)``.
+    This is the shared core of :func:`cleaned_psf_from_fits` and the inline path used
+    when an image has been reprojected onto a target grid: in that case the kernel must
+    be sized in pixels of the *target* WCS rather than the on-disk WCS.
     """
-    from astropy.io import fits
-    from astropy.wcs import WCS
     from astropy.wcs.utils import proj_plane_pixel_scales
 
-    header = fits.getheader(fits_path)
-    if "BMAJ" not in header or "BMIN" not in header:
-        raise KeyError(f"Expected BMAJ/BMIN in FITS header for cleaned mode: {fits_path}")
-
-    imwcs = WCS(header).celestial
-
-    if shape is None:
-        if "NAXIS1" not in header or "NAXIS2" not in header:
-            raise KeyError(
-                f"Expected NAXIS1/NAXIS2 in FITS header to infer PSF shape: {fits_path}"
-            )
-        shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
-
-    bmaj_deg = float(header["BMAJ"])
-    bmin_deg = float(header["BMIN"])
     if bmaj_deg <= 0 or bmin_deg <= 0:
-        raise ValueError(f"BMAJ/BMIN must be positive in FITS header for cleaned mode: {fits_path}")
+        raise ValueError(
+            f"BMAJ/BMIN must be positive for cleaned-PSF synthesis, got "
+            f"bmaj={bmaj_deg}, bmin={bmin_deg}"
+        )
 
     pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
     if pixel_scales.shape[0] < 2:
-        raise ValueError(f"Could not derive 2D pixel scales from WCS for: {fits_path}")
+        raise ValueError("Could not derive 2D pixel scales from WCS for cleaned-PSF synthesis.")
     sigma_y = (bmaj_deg / pixel_scales[1]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
     sigma_x = (bmin_deg / pixel_scales[0]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
@@ -303,9 +288,112 @@ def cleaned_psf_from_fits(
     gaussian = np.exp(-0.5 * (((yy - cy) / sigma_y) ** 2 + ((xx - cx) / sigma_x) ** 2))
     peak = gaussian.max()
     if peak <= 0:
-        raise ValueError(f"Generated cleaned PSF has non-positive peak for: {fits_path}")
-    gaussian = gaussian / peak
-    return jnp.array(gaussian)
+        raise ValueError("Generated cleaned PSF has non-positive peak.")
+    return jnp.array(gaussian / peak)
+
+
+def cleaned_psf_from_fits(
+    fits_path: str,
+    *,
+    shape: tuple[int, int] | None = None,
+    imwcs_override=None,
+) -> Array:
+    """
+    Build a synthetic, normalized PSF image from FITS beam metadata.
+
+    This is intended for "cleaned" images where you have beam FWHM values in the FITS header
+    (``BMAJ``/``BMIN`` in degrees), and want a compact PSF image to feed into
+    :func:`~image_plane_correction.catalogs.theoretical_sky_beam_function`.
+
+    If ``shape`` is not provided, it is inferred from the header as ``(NAXIS2, NAXIS1)``.
+
+    Pass ``imwcs_override`` to use a different celestial WCS than the one in the file
+    (e.g. after reprojecting the parent image onto a different pixel scale). Beam FWHM
+    is still read from the FITS header.
+    """
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    header = fits.getheader(fits_path)
+    if "BMAJ" not in header or "BMIN" not in header:
+        raise KeyError(f"Expected BMAJ/BMIN in FITS header for cleaned mode: {fits_path}")
+
+    imwcs = imwcs_override if imwcs_override is not None else WCS(header).celestial
+
+    if shape is None:
+        if "NAXIS1" not in header or "NAXIS2" not in header:
+            raise KeyError(
+                f"Expected NAXIS1/NAXIS2 in FITS header to infer PSF shape: {fits_path}"
+            )
+        shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
+
+    return _synth_cleaned_psf_kernel(
+        bmaj_deg=float(header["BMAJ"]),
+        bmin_deg=float(header["BMIN"]),
+        imwcs=imwcs,
+        shape=shape,
+    )
+
+
+def _make_target_wcs(seed_wcs, seed_n: int, target_size: int):
+    """
+    Scale a celestial WCS to a ``target_size × target_size`` grid preserving sky coverage.
+
+    Updates ``CRPIX`` to keep pixel centers consistent (FITS 1-indexed) and rescales
+    ``CD`` (if present) or ``CDELT`` so the same field of view maps onto the new grid.
+    The returned WCS has ``pixel_shape == (target_size, target_size)`` so downstream code
+    (e.g. :func:`~image_plane_correction.catalogs.theoretical_sky_beam_function`) sees a
+    consistent shape.
+    """
+    factor = float(seed_n) / float(target_size)  # >1 when downsampling
+    target = seed_wcs.deepcopy()
+    target.wcs.crpix = (np.asarray(seed_wcs.wcs.crpix, dtype=float) - 0.5) / factor + 0.5
+    if seed_wcs.wcs.has_cd():
+        target.wcs.cd = np.asarray(seed_wcs.wcs.cd, dtype=float) * factor
+    else:
+        target.wcs.cdelt = np.asarray(seed_wcs.wcs.cdelt, dtype=float) * factor
+    target.pixel_shape = (target_size, target_size)
+    return target
+
+
+_RESAMPLE_METHODS = ("interp", "adaptive", "exact")
+
+
+def _reproject_array(
+    arr,
+    source_wcs,
+    target_wcs,
+    shape_out: tuple[int, int],
+    method: str = "interp",
+):
+    """Reproject ``arr`` from ``source_wcs`` to ``target_wcs`` at the given output shape."""
+    if method not in _RESAMPLE_METHODS:
+        raise ValueError(
+            f"Unknown resample_method {method!r}; expected one of {_RESAMPLE_METHODS}"
+        )
+    if method == "interp":
+        from reproject import reproject_interp as _fn
+    elif method == "adaptive":
+        from reproject import reproject_adaptive as _fn
+    else:
+        from reproject import reproject_exact as _fn
+    data, _ = _fn((np.asarray(arr), source_wcs), target_wcs, shape_out=shape_out)
+    return np.asarray(data)
+
+
+def _reference_as_hdu(reference, *, fallback_wcs):
+    """
+    Normalize a reference-sky input (array or HDU) to a ``fits.PrimaryHDU``.
+
+    Array inputs are assumed to live on ``fallback_wcs`` (typically the image's WCS
+    *before* any reprojection has been applied). HDU inputs are returned unchanged.
+    """
+    from astropy.io import fits
+
+    if isinstance(reference, (fits.PrimaryHDU, fits.ImageHDU)):
+        return reference
+    data = np.asarray(reference)
+    return fits.PrimaryHDU(data=data, header=fallback_wcs.to_header())
 
 
 def calcflow(
@@ -332,10 +420,13 @@ def calcflow(
     catalog_qa: bool = False,
     catalog_qa_params: Optional[Any] = None,
     quality_metrics: Optional[MutableMapping[str, Any]] = None,
+    target_size: Optional[int] = None,
+    target_wcs: Optional[Any] = None,
+    resample_method: Literal["interp", "adaptive", "exact"] = "interp",
 ):
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
-    or a precomputed ``reference_sky`` (array or separate FITS via ``reference_sky_fn``).
+    or a precomputed ``reference_sky`` (array or HDU, or separate FITS via ``reference_sky_fn``).
 
     Brox smoothness ``alpha`` and gradient ``gamma`` default to values used historically in
     this pipeline; dataset-specific tuning can be done with ``scripts/optimize_alpha_gamma.py``
@@ -359,9 +450,24 @@ def calcflow(
     Set ``write_reference_sky=True`` to write the reference sky map used for flow solving to
     ``outroot`` using a filename suffix ``"_reference.fits"`` (gated by the same QA pass
     condition as ``write=True`` output products).
+
+    Resampling
+    ----------
+    Pass ``target_size`` (or an explicit ``target_wcs``) to resample the image and
+    reference sky onto a common ``N×N`` grid before flow solving. This lets ``calcflow``
+    accept a pair of inputs with different sizes — useful for the frequency cascade,
+    where subbands often have different pixel scales. When ``target_wcs`` is omitted,
+    it is built from the image's WCS scaled to ``target_size``, preserving the same
+    field of view. Resampling uses the ``reproject`` library; pick the algorithm via
+    ``resample_method`` (``"interp"`` for bilinear / default, ``"adaptive"`` for
+    anti-aliased downsampling, ``"exact"`` for flux-conserving spherical-polygon
+    overlap).
+
+    The returned ``reference_sky`` is always a :class:`~astropy.io.fits.PrimaryHDU`
+    that carries both the array data and the WCS used during flow solving, which
+    makes it self-describing for use in chained calls (e.g. the frequency cascades).
     """
     from astropy.io import fits
-    from astropy.wcs.utils import proj_plane_pixel_scales
 
     from . import data
     from .catalogs import theoretical_sky_beam_function
@@ -415,48 +521,140 @@ def calcflow(
             f"Could not parse for {image_fn!r}: obs_date={obs_date!r}, freq_hz={freq_hz!r}."
         )
 
-    image, imwcs = data.fits_image(image_fn)
+    image, source_imwcs = data.fits_image(image_fn)
     image = _sanitize_finite_jax(image, os.path.basename(image_fn))
+    source_image_shape = tuple(int(s) for s in np.asarray(image).shape)
 
+    # Resolve the target grid (if any). When neither target_size nor target_wcs is
+    # provided, no reprojection happens and everything operates on the image's native grid.
+    if target_wcs is not None and target_size is None:
+        ps = getattr(target_wcs, "pixel_shape", None)
+        if ps is None or ps[0] is None or ps[1] is None:
+            raise ValueError(
+                "`target_wcs` must have its `pixel_shape` set, or pass `target_size` explicitly."
+            )
+        if int(ps[0]) != int(ps[1]):
+            raise ValueError(
+                f"`target_wcs.pixel_shape` must be square for calcflow, got {ps}."
+            )
+        target_size = int(ps[0])
+    if target_size is not None and target_wcs is None:
+        target_wcs = _make_target_wcs(source_imwcs, source_image_shape[0], int(target_size))
+
+    if target_size is not None:
+        assert target_wcs is not None  # resolved above
+        target_shape = (int(target_size), int(target_size))
+        if source_image_shape != target_shape:
+            image_np = _reproject_array(
+                np.asarray(image),
+                source_imwcs,
+                target_wcs,
+                target_shape,
+                method=resample_method,
+            )
+            image = _sanitize_finite_jax(
+                jnp.array(image_np), f"{os.path.basename(image_fn)} (reprojected)"
+            )
+        imwcs = target_wcs
+    else:
+        imwcs = source_imwcs
+
+    from astropy.wcs import WCS as _WCS
+
+    # Normalize reference_sky inputs to an HDU on `imwcs`. We track whether the
+    # caller supplied a reference so we can decide whether to build one fresh.
+    reference_hdu: Optional[Any] = None
     if reference_sky_fn is not None:
-        reference_sky, _ = data.fits_image(reference_sky_fn)
-        reference_sky = _sanitize_finite_jax(
-            reference_sky, os.path.basename(reference_sky_fn)
+        with fits.open(reference_sky_fn) as hdul:
+            primary = hdul[0]
+            ref_data = np.asarray(primary.data).squeeze()
+            if ref_data.dtype.byteorder in (">", "!"):
+                ref_data = ref_data.byteswap().view(ref_data.dtype.newbyteorder("="))
+            ref_wcs = _WCS(primary.header).celestial
+            reference_hdu = fits.PrimaryHDU(data=ref_data, header=ref_wcs.to_header())
+    elif reference_sky is not None:
+        # Array inputs are assumed to live on the *source* image's WCS (pre-reprojection).
+        # HDU inputs carry their own WCS.
+        reference_hdu = _reference_as_hdu(reference_sky, fallback_wcs=source_imwcs)
+
+    if reference_hdu is not None:
+        ref_wcs = _WCS(reference_hdu.header).celestial
+        ref_label = os.path.basename(reference_sky_fn) if reference_sky_fn else "array"
+        ref_data = _sanitize_finite_jax(
+            jnp.array(np.asarray(reference_hdu.data)),
+            f"reference_sky ({ref_label})",
+        )
+        # If the reference grid doesn't match the active grid, reproject onto `imwcs`.
+        active_shape = (int(np.asarray(image).shape[0]), int(np.asarray(image).shape[1]))
+        if ref_data.shape != active_shape:
+            ref_np = _reproject_array(
+                np.asarray(ref_data),
+                ref_wcs,
+                imwcs,
+                active_shape,
+                method=resample_method,
+            )
+            ref_data = _sanitize_finite_jax(jnp.array(ref_np), "reference_sky (reprojected)")
+        reference_hdu = fits.PrimaryHDU(
+            data=np.asarray(ref_data), header=imwcs.to_header()
         )
 
+    # Build the PSF kernel on the *active* (post-reproject) grid when needed.
+    psf = None
     if cleaned:
-        # Cleaned images use beam metadata from FITS headers and do not require
-        # deriving/reading a matching PSF image by filename.
-        if psf_fn is not None:
-            header_path = psf_fn
-        else:
-            # Build a compact synthetic PSF kernel from beam sizes in the image header.
-            header = input_header
-            if "BMAJ" not in header or "BMIN" not in header:
-                raise KeyError(
-                    f"Expected BMAJ/BMIN in image header for cleaned mode: {image_fn}"
-                )
-            pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
-            sigma_y = (float(header["BMAJ"]) / pixel_scales[1]) / (
-                2.0 * np.sqrt(2.0 * np.log(2.0))
+        # Cleaned images use beam metadata from FITS headers; the kernel must live
+        # at the same pixel scale as the image being analyzed. When ``psf_fn`` is
+        # supplied, beam keys are read from that file's header; otherwise from the
+        # image header.
+        beam_header = fits.getheader(psf_fn) if psf_fn is not None else input_header
+        if "BMAJ" not in beam_header or "BMIN" not in beam_header:
+            raise KeyError(
+                f"Expected BMAJ/BMIN in {'PSF' if psf_fn is not None else 'image'} "
+                f"header for cleaned mode: {psf_fn or image_fn}"
             )
-            sigma_x = (float(header["BMIN"]) / pixel_scales[0]) / (
-                2.0 * np.sqrt(2.0 * np.log(2.0))
-            )
-            radius = int(np.ceil(4.0 * max(sigma_x, sigma_y)))
-            size = max(9, 2 * radius + 1)
-            psf_shape = (size, size)
-            header_path = image_fn
-        psf = cleaned_psf_from_fits(
-            header_path,
-            shape=psf_shape if psf_fn is None else None,
-        )
-    elif psf_fn is not None:
-        psf, _ = data.fits_image(psf_fn)
+        bmaj_deg = float(beam_header["BMAJ"])
+        bmin_deg = float(beam_header["BMIN"])
+        from astropy.wcs.utils import proj_plane_pixel_scales
 
-    if reference_sky is None:
+        pixel_scales = np.abs(proj_plane_pixel_scales(imwcs))
+        sigma_y = (bmaj_deg / pixel_scales[1]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        sigma_x = (bmin_deg / pixel_scales[0]) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        radius = int(np.ceil(4.0 * max(sigma_x, sigma_y)))
+        # Preserve the legacy behavior of inferring the PSF shape from the PSF file's
+        # ``NAXIS`` when one is provided and no reprojection has occurred.
+        if psf_fn is not None and target_size is None:
+            psf = cleaned_psf_from_fits(psf_fn)
+        else:
+            size = max(9, 2 * radius + 1)
+            psf = _synth_cleaned_psf_kernel(
+                bmaj_deg=bmaj_deg,
+                bmin_deg=bmin_deg,
+                imwcs=imwcs,
+                shape=(size, size),
+            )
+    elif psf_fn is not None:
+        psf_np, psf_wcs = data.fits_image(psf_fn)
+        psf_np = np.asarray(psf_np)
+        if target_size is not None and int(target_size) != int(source_image_shape[0]):
+            # Scale the PSF's WCS by the same factor as the image so its kernel covers
+            # the same on-sky support at the new pixel scale. The PSF array itself is
+            # resized by the same factor so its footprint (in pixels of the analysis grid)
+            # is preserved.
+            factor = float(source_image_shape[0]) / float(target_size)  # >1 when downsampling
+            new_psf_n = max(9, int(round(psf_np.shape[0] / factor)))
+            if new_psf_n % 2 == 0:
+                new_psf_n += 1
+            psf_target_wcs = _make_target_wcs(psf_wcs, psf_np.shape[0], new_psf_n)
+            psf_np = _reproject_array(
+                psf_np, psf_wcs, psf_target_wcs, (new_psf_n, new_psf_n), method=resample_method
+            )
+            psf_np = np.nan_to_num(psf_np, nan=0.0, posinf=0.0, neginf=0.0)
+        psf = jnp.array(psf_np)
+
+    if reference_hdu is None:
+        # Build a fresh reference sky on the active grid using the catalog + PSF.
         image_shape = np.asarray(image).shape
-        reference_sky = theoretical_sky_beam_function(
+        ref_arr = theoretical_sky_beam_function(
             imwcs,
             psf,
             catalog=catalog,
@@ -467,25 +665,27 @@ def calcflow(
             obs_date=obs_date,
             freq_hz=freq_hz,
         )
-    else:
-        # Treat user-supplied reference_sky as "truth": fail if it contains NaNs/Infs
-        # rather than silently filling.
-        pass
+        ref_arr = _sanitize_finite_jax(ref_arr, "reference_sky (synthetic)")
+        reference_hdu = fits.PrimaryHDU(
+            data=np.asarray(ref_arr), header=imwcs.to_header()
+        )
+    assert reference_hdu is not None  # narrowed for downstream attribute access
 
-    if np.asarray(image).shape != np.asarray(reference_sky).shape:
+    if np.asarray(image).shape != np.asarray(reference_hdu.data).shape:
         raise ValueError(
-            "image and reference_sky must have the same shape: "
-            f"{np.asarray(image).shape} vs {np.asarray(reference_sky).shape}"
+            "image and reference_sky must have the same shape after any resampling: "
+            f"{np.asarray(image).shape} vs {np.asarray(reference_hdu.data).shape}"
         )
 
     # Validate reference sky before it is used for preprocessing / flow solving.
-    check_reference_sky(reference_sky, label="reference_sky")
+    check_reference_sky(reference_hdu, label="reference_sky")
 
     n_img = int(np.asarray(image).shape[0])
     horizon_r = horizon_r_normalized(imwcs, n=n_img, horizon_elevation_deg=horizon_elevation_deg)
 
+    reference_jax = jnp.array(reference_hdu.data)
     image_processed, sky_processed = preprocess(
-        image, reference_sky, weight=preprocess_weight, horizon_r=horizon_r
+        image, reference_jax, weight=preprocess_weight, horizon_r=horizon_r
     )
     flow = Flow.brox(
         image_processed,
@@ -508,7 +708,7 @@ def calcflow(
             )
         score = runqa(
             image,
-            reference_sky,
+            reference_jax,
             flow,
             dewarped,
             bright_source_flux_qa_fn=log_bright_source_alignment
@@ -544,9 +744,14 @@ def calcflow(
         if outroot is None:
             raise ValueError("`outroot` must be provided when write=True or write_reference_sky=True")
         if (qa and qa_passed) or not qa:
-            # Preserve full input metadata and refresh WCS-related cards.
+            # Preserve full input metadata and refresh WCS-related cards. If we
+            # reprojected onto a target grid, NAXIS1/NAXIS2 must match the new shape.
             output_header = input_header.copy()
             output_header.update(imwcs.to_header())
+            out_shape = np.asarray(dewarped).shape
+            output_header["NAXIS"] = 2
+            output_header["NAXIS1"] = int(out_shape[1])
+            output_header["NAXIS2"] = int(out_shape[0])
 
             if write:
                 outname = os.path.join(
@@ -559,13 +764,12 @@ def calcflow(
                 ref_outname = os.path.join(
                     outroot, os.path.basename(image_fn.replace(".fits", "_reference.fits"))
                 )
-                reference_arr = np.asarray(reference_sky)
-                fits.writeto(ref_outname, reference_arr, output_header)
+                fits.writeto(ref_outname, np.asarray(reference_hdu.data), output_header)
         else:
             msg = f"image {image_fn} failed qa. Not writing outputs."
             print(msg)
 
-    return image, reference_sky, flow, dewarped, qa_passed
+    return image, reference_hdu, flow, dewarped, qa_passed
 
 
 def flow_cascade73MHz(
@@ -585,6 +789,8 @@ def flow_cascade73MHz(
     use_best_pb_model: bool = False,
     bright_source_flux_qa=False,
     bright_source_flux_qa_count=10,
+    target_size: Optional[int] = None,
+    resample_method: Literal["interp", "adaptive", "exact"] = "interp",
 ):
     """
     Run a 73MHz-seeded frequency cascade over a list of image filenames.
@@ -602,11 +808,20 @@ def flow_cascade73MHz(
       ``"73MHz" -> f"{freq}MHz"`` yields existing peer image files across all
       subbands present in `image_filenames`.
 
+    Resampling
+    ----------
+    Pass ``target_size`` (or rely on auto-discovery from the 73 MHz seed when ``None``)
+    to put every subband onto a common ``N×N`` grid. When ``None``, the seed image's
+    ``NAXIS1`` defines the canonical grid — appropriate when the 73 MHz seed is the
+    largest input, since all later steps then downsample onto it.
+
     Returns
     -------
     dict[int, list[np.ndarray]]
         Mapping of frequency MHz to a list of flow offset arrays for each 73MHz seed file.
     """
+    from astropy.io import fits
+
     image_filenames = list(image_filenames)
     groups = group_files_by_frequency(image_filenames)
     freqs = sorted(groups.keys())
@@ -639,6 +854,12 @@ def flow_cascade73MHz(
         if not cleaned and fn_psf is None:
             raise ValueError(f"No matching PSF provided for image: {fn}")
 
+        seed_target_size: Optional[int] = target_size
+        if seed_target_size is None:
+            seed_header = fits.getheader(fn)
+            if "NAXIS1" in seed_header:
+                seed_target_size = int(seed_header["NAXIS1"])
+
         image, reference_sky73, flow, dewarped, _qa_ok = calcflow(
             fn,
             psf_fn=fn_psf,
@@ -656,65 +877,49 @@ def flow_cascade73MHz(
             use_best_pb_model=use_best_pb_model,
             bright_source_flux_qa=bright_source_flux_qa,
             bright_source_flux_qa_count=bright_source_flux_qa_count,
+            target_size=seed_target_size,
+            resample_method=resample_method,
         )
         offsets[73].append(np.nan_to_num(flow.offsets))
 
-        reference_sky = reference_sky73
-        for freq in freqs[i73 + 1 :]:
-            fn_next = fn.replace("73MHz", f"{freq}MHz")
-            if fn_next == fn or fn_next not in lookup[freq]:
-                raise AssertionError(
-                    f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
+        for direction_freqs in (freqs[i73 + 1 :], list(reversed(freqs[:i73]))):
+            for freq in direction_freqs:
+                fn_next = fn.replace("73MHz", f"{freq}MHz")
+                if fn_next == fn or fn_next not in lookup[freq]:
+                    raise AssertionError(
+                        f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
+                    )
+                image, _, flow, dewarped, _qa_ok = calcflow(
+                    fn_next,
+                    reference_sky=reference_sky73,
+                    qa=qa,
+                    write=write,
+                    outroot=outroot,
+                    catalog=catalog,
+                    max_flux=max_flux,
+                    catalog_path=catalog_path,
+                    preprocess_weight=preprocess_weight,
+                    alpha=alpha,
+                    gamma=gamma,
+                    scale_factor=scale_factor,
+                    use_best_pb_model=use_best_pb_model,
+                    bright_source_flux_qa=bright_source_flux_qa,
+                    bright_source_flux_qa_count=bright_source_flux_qa_count,
+                    target_size=seed_target_size,
+                    resample_method=resample_method,
                 )
-            image, reference_sky, flow, dewarped, _qa_ok = calcflow(
-                fn_next,
-                reference_sky=reference_sky,
-                qa=qa,
-                write=write,
-                outroot=outroot,
-                catalog=catalog,
-                max_flux=max_flux,
-                catalog_path=catalog_path,
-                preprocess_weight=preprocess_weight,
-                alpha=alpha,
-                gamma=gamma,
-                scale_factor=scale_factor,
-                use_best_pb_model=use_best_pb_model,
-                bright_source_flux_qa=bright_source_flux_qa,
-                bright_source_flux_qa_count=bright_source_flux_qa_count,
-            )
-            offsets[freq].append(np.nan_to_num(flow.offsets))
-
-        reference_sky = reference_sky73
-        for freq in reversed(freqs[:i73]):
-            fn_next = fn.replace("73MHz", f"{freq}MHz")
-            if fn_next == fn or fn_next not in lookup[freq]:
-                raise AssertionError(
-                    f"Filename replacement did not map to a valid {freq}MHz peer: {fn_next}"
-                )
-            image, reference_sky, flow, dewarped, _qa_ok = calcflow(
-                fn_next,
-                reference_sky=reference_sky,
-                qa=qa,
-                write=write,
-                outroot=outroot,
-                catalog=catalog,
-                max_flux=max_flux,
-                catalog_path=catalog_path,
-                preprocess_weight=preprocess_weight,
-                alpha=alpha,
-                gamma=gamma,
-                scale_factor=scale_factor,
-                use_best_pb_model=use_best_pb_model,
-                bright_source_flux_qa=bright_source_flux_qa,
-                bright_source_flux_qa_count=bright_source_flux_qa_count,
-            )
-            offsets[freq].append(np.nan_to_num(flow.offsets))
+                offsets[freq].append(np.nan_to_num(flow.offsets))
 
     return offsets
 
 
-def flow_cascade73MHz_phase2(work_dir: str, logger=None):
+def flow_cascade73MHz_phase2(
+    work_dir: str,
+    logger=None,
+    *,
+    target_size: Optional[int] = None,
+    resample_method: Literal["interp", "adaptive", "exact"] = "interp",
+):
     """
     Run phase-2 73MHz-seeded cascade over subband directories.
 
@@ -724,11 +929,21 @@ def flow_cascade73MHz_phase2(work_dir: str, logger=None):
         Phase 2 working directory containing all subband directories.
     logger : logging.Logger
         Logger to use for logging. If not provided, a default logger will be used.
+    target_size : int, optional
+        Force all subbands onto a common ``N×N`` grid via WCS-aware reprojection.
+        When ``None`` (default), the size is auto-discovered from the 73 MHz seed
+        image's ``NAXIS1`` and the cascade downsamples every other subband onto it.
+    resample_method : {"interp", "adaptive", "exact"}, default "interp"
+        Resampling algorithm forwarded to :mod:`reproject`. ``"interp"`` is bilinear,
+        ``"adaptive"`` is DeForest anti-aliased, ``"exact"`` is flux-conserving.
+
     Returns
     -------
     dict
         {subband: bool} indicating success/failure per subband.
     """
+    from astropy.io import fits
+
     if logger is None:
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.INFO)
@@ -783,50 +998,47 @@ def flow_cascade73MHz_phase2(work_dir: str, logger=None):
 
         fn_psf = psf_by_image.get(fn)
         cleaned = fn_psf is None
+
+        seed_target_size: Optional[int] = target_size
+        if seed_target_size is None:
+            try:
+                seed_header = fits.getheader(fn)
+                if "NAXIS1" in seed_header:
+                    seed_target_size = int(seed_header["NAXIS1"])
+            except Exception as exc:  # pragma: no cover - defensive: keep cascade running
+                logger.warning("Could not read seed header to derive target_size: %s", exc)
+                seed_target_size = None
+
         _, reference_sky73, _, _, qa_ok = calcflow(
             fn,
             psf_fn=fn_psf,
             cleaned=cleaned,
             qa=True,
             write=False,
+            target_size=seed_target_size,
+            resample_method=resample_method,
         )
         _record_result(fn, qa_ok)
 
-        reference_sky = reference_sky73
-        for freq in freqs[i73 + 1 :]:
-            fn_next = fn.replace("73MHz", f"{freq}MHz")
-            if fn_next == fn or fn_next not in lookup[freq]:
-                logger.warning(
-                    "Filename replacement did not map to a valid %sMHz peer: %s",
-                    freq,
+        for direction_freqs in (freqs[i73 + 1 :], list(reversed(freqs[:i73]))):
+            for freq in direction_freqs:
+                fn_next = fn.replace("73MHz", f"{freq}MHz")
+                if fn_next == fn or fn_next not in lookup[freq]:
+                    logger.warning(
+                        "Filename replacement did not map to a valid %sMHz peer: %s",
+                        freq,
+                        fn_next,
+                    )
+                    continue
+                _, _, _, _, qa_ok = calcflow(
                     fn_next,
+                    reference_sky=reference_sky73,
+                    qa=True,
+                    write=False,
+                    target_size=seed_target_size,
+                    resample_method=resample_method,
                 )
-                continue
-            _, reference_sky, _, _, qa_ok = calcflow(
-                fn_next,
-                reference_sky=reference_sky,
-                qa=True,
-                write=False,
-            )
-            _record_result(fn_next, qa_ok)
-
-        reference_sky = reference_sky73
-        for freq in reversed(freqs[:i73]):
-            fn_next = fn.replace("73MHz", f"{freq}MHz")
-            if fn_next == fn or fn_next not in lookup[freq]:
-                logger.warning(
-                    "Filename replacement did not map to a valid %sMHz peer: %s",
-                    freq,
-                    fn_next,
-                )
-                continue
-            _, reference_sky, _, _, qa_ok = calcflow(
-                fn_next,
-                reference_sky=reference_sky,
-                qa=True,
-                write=False,
-            )
-            _record_result(fn_next, qa_ok)
+                _record_result(fn_next, qa_ok)
 
     n_ok = sum(1 for v in results.values() if v)
     n_fail = sum(1 for v in results.values() if not v)
