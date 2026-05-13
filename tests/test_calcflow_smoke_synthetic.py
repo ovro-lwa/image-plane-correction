@@ -77,8 +77,10 @@ class TestCalcflowSyntheticSmoke(unittest.TestCase):
                 gamma=150.0,
             )
 
-        mse_before = float(np.mean((np.asarray(img_out) - np.asarray(ref_out)) ** 2))
-        mse_after = float(np.mean((np.asarray(dewarped) - np.asarray(ref_out)) ** 2))
+        # calcflow now returns reference_sky as a PrimaryHDU; unwrap the array.
+        ref_arr = np.asarray(ref_out.data)
+        mse_before = float(np.mean((np.asarray(img_out) - ref_arr) ** 2))
+        mse_after = float(np.mean((np.asarray(dewarped) - ref_arr) ** 2))
         self.assertLess(mse_after, mse_before)
         self.assertTrue(qa_ok)
 

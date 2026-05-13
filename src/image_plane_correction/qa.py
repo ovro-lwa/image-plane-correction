@@ -22,10 +22,14 @@ def check_reference_sky(reference_sky: Any, *, label: str = "reference_sky") -> 
     """
     Validate the reference sky image before it is used for flow solving.
 
+    Accepts either a raw array or an ``astropy.io.fits`` HDU (in which case the
+    ``.data`` attribute is validated).
+
     Fails fast if the map contains any non-finite values or if it is entirely zeros.
     Returns a small summary dict and logs a one-line summary at INFO level.
     """
-    arr = np.asarray(reference_sky)
+    data = reference_sky.data if hasattr(reference_sky, "data") and not isinstance(reference_sky, np.ndarray) else reference_sky
+    arr = np.asarray(data)
     if arr.size == 0:
         raise ValueError(f"{label} is empty.")
 
