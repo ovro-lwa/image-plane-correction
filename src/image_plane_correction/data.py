@@ -11,19 +11,30 @@ from jaxtyping import Array
 from glob import glob
 
 
-def fits_image(path: str) -> Tuple[Array, wcs.WCS]:
+def fits_image(path: str, squeeze: bool = True) -> Tuple[Array, wcs.WCS]:
     """
     Reads a fits image at a given path, returning the contained image and wcs data.
+
+    Parameters
+    ----------
+    path
+        Path to a FITS file (primary HDU is used).
+    squeeze
+        If True (default), drop length-1 axes with ``numpy.squeeze`` before returning
+        the array (legacy behavior for mostly-2D radio images). If False, return the
+        primary HDU array shape unchanged so true 3D/4D cubes stay N-dimensional; the
+        returned WCS is still the 2D celestial sub-WCS for the sky plane.
     """
     image = fits.open(path)
     # JAX expects native-endian arrays; FITS data can be big-endian (e.g. '>f4').
-    image_np = np.asarray(image[0].data.squeeze())
+    raw = np.asarray(image[0].data)
+    image_np = np.squeeze(raw) if squeeze else raw
     if image_np.dtype.byteorder in (">", "!"):
         image_np = image_np.byteswap().view(image_np.dtype.newbyteorder("="))
     image_data = jnp.array(image_np)
-    # Many OVRO-LWA products have extra non-celestial axes (e.g. STOKES/FREQ) even when the
-    # image data is effectively 2D after squeezing. Always return a 2D celestial WCS so
-    # downstream code (skycoord_to_pixel, pixel_to_skycoord, beam maps) behaves consistently.
+    # Many OVRO-LWA products have extra non-celestial axes (e.g. STOKES/FREQ). Always return
+    # a 2D celestial WCS so downstream code (skycoord_to_pixel, pixel_to_skycoord, beam maps)
+    # behaves consistently on the sky plane (last two array axes).
     full_wcs = wcs.WCS(image[0].header)
     imwcs = full_wcs.celestial
     image.close()

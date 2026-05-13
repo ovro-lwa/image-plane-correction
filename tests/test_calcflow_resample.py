@@ -180,6 +180,51 @@ class TestCalcflowResample(unittest.TestCase):
         self.assertEqual(np.asarray(ref_out.data).shape, (target_size, target_size))
         self.assertEqual(np.asarray(dewarped).shape, (target_size, target_size))
 
+    def test_write_preserves_3d_datacube(self):
+        """True 3D arrays keep ``NAXIS3`` and frequency-like WCS cards on write."""
+        n = 32
+        nz = 2
+        hdr = _wcs_tan_header(n, cdelt_deg=0.1)
+        hdr["NAXIS"] = 3
+        hdr["NAXIS3"] = nz
+        hdr["CTYPE3"] = "FREQ"
+        hdr["CRVAL3"] = 74e6
+        hdr["CRPIX3"] = 1.0
+        hdr["CDELT3"] = 1e6
+        hdr["CUNIT3"] = "Hz"
+
+        ref = _gaussian_blob(n, sigma_px=4.0)
+        cube = np.stack([ref, ref * 0.95], axis=0).astype(np.float32)
+
+        with tempfile.TemporaryDirectory() as td:
+            image_fn = str(Path(td) / "cube.fits")
+            fits.writeto(image_fn, cube, hdr, overwrite=True)
+
+            outroot = Path(td) / "out"
+            outroot.mkdir()
+
+            calcflow(
+                image_fn,
+                reference_sky=ref.astype(np.float32),
+                cleaned=False,
+                qa=False,
+                alpha=1.3,
+                gamma=150.0,
+                write=True,
+                write_reference_sky=True,
+                outroot=str(outroot),
+            )
+
+            dewarp_path = outroot / "cube_dewarp.fits"
+            self.assertTrue(dewarp_path.is_file())
+            with fits.open(dewarp_path) as hdul:
+                self.assertEqual(hdul[0].data.shape, (nz, n, n))
+                wh = hdul[0].header
+                self.assertEqual(int(wh["NAXIS"]), 3)
+                self.assertEqual(int(wh["NAXIS3"]), nz)
+                self.assertEqual(wh["CTYPE3"], "FREQ")
+                self.assertAlmostEqual(float(wh["CRVAL3"]), 74e6)
+
 
 if __name__ == "__main__":
     unittest.main()

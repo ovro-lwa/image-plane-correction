@@ -1,5 +1,6 @@
 from typing import Any, Iterable, Literal, MutableMapping, Optional, Union
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import os
@@ -82,6 +83,25 @@ class Flow:
             return jnp.reshape(results, shape=image.shape).squeeze()
         else:
             raise NotImplementedError()
+
+    def apply_broadcast(self, image: Array) -> Array:
+        """
+        Apply this 2D displacement field to every trailing (row, col) plane.
+
+        Leading dimensions (e.g. Stokes/frequency) are unchanged; each plane is warped
+        with the same offsets (typical for a single ionospheric model across a narrow
+        spectral cube).
+        """
+        img = jnp.asarray(image)
+        if img.ndim < 2:
+            raise ValueError(f"apply_broadcast expects ndim>=2, got shape {img.shape}")
+        if img.ndim == 2:
+            return self.apply(img)
+        lead = img.shape[:-2]
+        h, w = int(img.shape[-2]), int(img.shape[-1])
+        flat = jnp.reshape(img, (-1, h, w))
+        out_flat = jax.vmap(lambda plane: self.apply(plane))(flat)
+        return jnp.reshape(out_flat, (*lead, h, w))
 
     # the flow that would result from applying the current flow and then other_flow
     def compose(self, other_flow):
@@ -434,6 +454,83 @@ def _strip_extra_axis_cards(header, max_axis: int = 2) -> None:
             pass
 
 
+def _collapse_leading_to_spatial_plane(arr: Array) -> Array:
+    """Mean over all non-spatial axes (everything before the last two dimensions)."""
+    a = jnp.asarray(arr)
+    if a.ndim <= 2:
+        return a
+    axes = tuple(range(a.ndim - 2))
+    return jnp.mean(a, axis=axes)
+
+
+def _spatial_shape_from_array(arr) -> tuple[int, int]:
+    a = np.asarray(arr)
+    if a.ndim < 2:
+        raise ValueError(f"expected at least 2 dimensions, got shape {a.shape}")
+    return (int(a.shape[-2]), int(a.shape[-1]))
+
+
+def _broadcast_ref_to_image_shape(ref: Array, image_shape: tuple[int, ...]) -> Array:
+    """Broadcast 2D ``ref`` to ``image_shape``, or verify full ND ``ref`` matches."""
+    r = jnp.asarray(ref)
+    spatial = image_shape[-2:]
+    if r.ndim == 2:
+        if tuple(int(x) for x in r.shape) != spatial:
+            raise ValueError(f"2D reference shape {r.shape} != image spatial {spatial}")
+        if len(image_shape) == 2:
+            return r
+        return jnp.broadcast_to(r, image_shape)
+    if tuple(int(x) for x in r.shape) != tuple(int(x) for x in image_shape):
+        raise ValueError(f"reference shape {r.shape} != image shape {image_shape}")
+    return r
+
+
+def _reproject_nd_trailing_spatial(
+    arr: np.ndarray,
+    source_wcs,
+    target_wcs,
+    spatial_shape: tuple[int, int],
+    method: str,
+) -> np.ndarray:
+    """Reproject each trailing spatial plane with the same 2D WCS mapping."""
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return _reproject_array(arr, source_wcs, target_wcs, spatial_shape, method=method)
+    lead = arr.shape[:-2]
+    flat = arr.reshape(-1, arr.shape[-2], arr.shape[-1])
+    planes = [
+        _reproject_array(flat[i], source_wcs, target_wcs, spatial_shape, method=method)
+        for i in range(flat.shape[0])
+    ]
+    return np.stack(planes, axis=0).reshape(*lead, spatial_shape[0], spatial_shape[1])
+
+
+def _sync_naxis_cards_and_strip_unused_axes(header, shape: tuple[int, ...]) -> None:
+    """
+    Set FITS ``NAXIS`` / ``NAXISi`` from a numpy/C array shape (last index = FITS axis 1).
+
+    Remove ``NAXISi`` for ``i > len(shape)`` and strip per-axis WCS cards for axes beyond
+    the cube dimensionality so the header matches the written array.
+    """
+    nd = len(shape)
+    header["NAXIS"] = nd
+    for i in range(1, nd + 1):
+        header[f"NAXIS{i}"] = int(shape[-i])
+    for i in range(nd + 1, 17):
+        k = f"NAXIS{i}"
+        if k in header:
+            del header[k]
+    _strip_extra_axis_cards(header, max_axis=nd)
+
+
+def _build_preserved_output_header(input_header, imwcs, data_shape: tuple[int, ...]):
+    """Merge input metadata with the active 2D celestial WCS and fix ``NAXIS*`` for ``data_shape``."""
+    h = input_header.copy()
+    h.update(imwcs.to_header())
+    _sync_naxis_cards_and_strip_unused_axes(h, data_shape)
+    return h
+
+
 def calcflow(
     image_fn,
     psf_fn=None,
@@ -501,6 +598,15 @@ def calcflow(
     anti-aliased downsampling, ``"exact"`` for flux-conserving spherical-polygon
     overlap).
 
+    Multi-dimensional images
+    ------------------------
+    The image is read without collapsing singleton axes. Data with shape
+    ``(..., n_y, n_x)`` keep their leading dimensions through dewarping: Brox flow is
+    solved on the mean over leading planes (one shared 2D warp), then that field is
+    applied to every plane. Written FITS headers merge the input metadata with the
+    updated celestial WCS and retain extra axes (e.g. ``FREQ``) when the array is a
+    true 3D/4D cube.
+
     The returned ``reference_sky`` is always a :class:`~astropy.io.fits.PrimaryHDU`
     that carries both the array data and the WCS used during flow solving, which
     makes it self-describing for use in chained calls (e.g. the frequency cascades).
@@ -559,9 +665,9 @@ def calcflow(
             f"Could not parse for {image_fn!r}: obs_date={obs_date!r}, freq_hz={freq_hz!r}."
         )
 
-    image, source_imwcs = data.fits_image(image_fn)
+    image, source_imwcs = data.fits_image(image_fn, squeeze=False)
     image = _sanitize_finite_jax(image, os.path.basename(image_fn))
-    source_image_shape = tuple(int(s) for s in np.asarray(image).shape)
+    source_image_spatial_shape = _spatial_shape_from_array(image)
 
     # Resolve the target grid (if any). When neither target_size nor target_wcs is
     # provided, no reprojection happens and everything operates on the image's native grid.
@@ -577,13 +683,15 @@ def calcflow(
             )
         target_size = int(ps[0])
     if target_size is not None and target_wcs is None:
-        target_wcs = _make_target_wcs(source_imwcs, source_image_shape[0], int(target_size))
+        target_wcs = _make_target_wcs(
+            source_imwcs, source_image_spatial_shape[0], int(target_size)
+        )
 
     if target_size is not None:
         assert target_wcs is not None  # resolved above
         target_shape = (int(target_size), int(target_size))
-        if source_image_shape != target_shape:
-            image_np = _reproject_array(
+        if source_image_spatial_shape != target_shape:
+            image_np = _reproject_nd_trailing_spatial(
                 np.asarray(image),
                 source_imwcs,
                 target_wcs,
@@ -599,17 +707,20 @@ def calcflow(
 
     from astropy.wcs import WCS as _WCS
 
+    image_shape = tuple(int(s) for s in np.asarray(image).shape)
+    spatial_shape = _spatial_shape_from_array(image)
+
     # Normalize reference_sky inputs to an HDU on `imwcs`. We track whether the
     # caller supplied a reference so we can decide whether to build one fresh.
     reference_hdu: Optional[Any] = None
     if reference_sky_fn is not None:
         with fits.open(reference_sky_fn) as hdul:
             primary = hdul[0]
-            ref_data = np.asarray(primary.data).squeeze()
+            ref_data = np.asarray(primary.data)
             if ref_data.dtype.byteorder in (">", "!"):
                 ref_data = ref_data.byteswap().view(ref_data.dtype.newbyteorder("="))
-            ref_wcs = _WCS(primary.header).celestial
-            reference_hdu = fits.PrimaryHDU(data=ref_data, header=ref_wcs.to_header())
+            ref_hdr_in = primary.header.copy()
+            reference_hdu = fits.PrimaryHDU(data=ref_data, header=ref_hdr_in)
     elif reference_sky is not None:
         # Array inputs are assumed to live on the *source* image's WCS (pre-reprojection).
         # HDU inputs carry their own WCS.
@@ -622,20 +733,42 @@ def calcflow(
             jnp.array(np.asarray(reference_hdu.data)),
             f"reference_sky ({ref_label})",
         )
-        # If the reference grid doesn't match the active grid, reproject onto `imwcs`.
-        active_shape = (int(np.asarray(image).shape[0]), int(np.asarray(image).shape[1]))
-        if ref_data.shape != active_shape:
-            ref_np = _reproject_array(
-                np.asarray(ref_data),
-                ref_wcs,
-                imwcs,
-                active_shape,
-                method=resample_method,
-            )
-            ref_data = _sanitize_finite_jax(jnp.array(ref_np), "reference_sky (reprojected)")
-        reference_hdu = fits.PrimaryHDU(
-            data=np.asarray(ref_data), header=imwcs.to_header()
+        ref_spatial = _spatial_shape_from_array(ref_data)
+        # Match spatial grid to the active image; broadcast 2D references across leading axes.
+        if ref_data.ndim == 2:
+            if ref_spatial != spatial_shape:
+                ref_np = _reproject_array(
+                    np.asarray(ref_data),
+                    ref_wcs,
+                    imwcs,
+                    spatial_shape,
+                    method=resample_method,
+                )
+                ref_data = _sanitize_finite_jax(
+                    jnp.array(ref_np), "reference_sky (reprojected)"
+                )
+            ref_data = _broadcast_ref_to_image_shape(ref_data, image_shape)
+        else:
+            if tuple(int(x) for x in ref_data.shape[:-2]) != tuple(image_shape[:-2]):
+                raise ValueError(
+                    "reference_sky leading axes must match the image "
+                    f"(ref {tuple(ref_data.shape)} vs image {image_shape})"
+                )
+            if ref_spatial != spatial_shape:
+                ref_np = _reproject_nd_trailing_spatial(
+                    np.asarray(ref_data),
+                    ref_wcs,
+                    imwcs,
+                    spatial_shape,
+                    method=resample_method,
+                )
+                ref_data = _sanitize_finite_jax(
+                    jnp.array(ref_np), "reference_sky (reprojected)"
+                )
+        ref_header = _build_preserved_output_header(
+            input_header, imwcs, tuple(int(s) for s in np.asarray(ref_data).shape)
         )
+        reference_hdu = fits.PrimaryHDU(data=np.asarray(ref_data), header=ref_header)
 
     # Build the PSF kernel on the *active* (post-reproject) grid when needed.
     psf = None
@@ -673,12 +806,12 @@ def calcflow(
     elif psf_fn is not None:
         psf_np, psf_wcs = data.fits_image(psf_fn)
         psf_np = np.asarray(psf_np)
-        if target_size is not None and int(target_size) != int(source_image_shape[0]):
+        if target_size is not None and int(target_size) != int(source_image_spatial_shape[0]):
             # Scale the PSF's WCS by the same factor as the image so its kernel covers
             # the same on-sky support at the new pixel scale. The PSF array itself is
             # resized by the same factor so its footprint (in pixels of the analysis grid)
             # is preserved.
-            factor = float(source_image_shape[0]) / float(target_size)  # >1 when downsampling
+            factor = float(source_image_spatial_shape[0]) / float(target_size)  # >1 when downsampling
             new_psf_n = max(9, int(round(psf_np.shape[0] / factor)))
             if new_psf_n % 2 == 0:
                 new_psf_n += 1
@@ -691,12 +824,11 @@ def calcflow(
 
     if reference_hdu is None:
         # Build a fresh reference sky on the active grid using the catalog + PSF.
-        image_shape = np.asarray(image).shape
         ref_arr = theoretical_sky_beam_function(
             imwcs,
             psf,
             catalog=catalog,
-            img_size=image_shape[0],
+            img_size=spatial_shape[0],
             max_flux=max_flux,
             path=catalog_path,
             use_best_pb_model=use_best_pb_model,
@@ -704,9 +836,11 @@ def calcflow(
             freq_hz=freq_hz,
         )
         ref_arr = _sanitize_finite_jax(ref_arr, "reference_sky (synthetic)")
-        reference_hdu = fits.PrimaryHDU(
-            data=np.asarray(ref_arr), header=imwcs.to_header()
+        ref_arr = _broadcast_ref_to_image_shape(ref_arr, image_shape)
+        ref_header = _build_preserved_output_header(
+            input_header, imwcs, tuple(int(s) for s in np.asarray(ref_arr).shape)
         )
+        reference_hdu = fits.PrimaryHDU(data=np.asarray(ref_arr), header=ref_header)
     assert reference_hdu is not None  # narrowed for downstream attribute access
 
     if np.asarray(image).shape != np.asarray(reference_hdu.data).shape:
@@ -718,12 +852,14 @@ def calcflow(
     # Validate reference sky before it is used for preprocessing / flow solving.
     check_reference_sky(reference_hdu, label="reference_sky")
 
-    n_img = int(np.asarray(image).shape[0])
+    n_img = int(spatial_shape[0])
     horizon_r = horizon_r_normalized(imwcs, n=n_img, horizon_elevation_deg=horizon_elevation_deg)
 
     reference_jax = jnp.array(reference_hdu.data)
+    image_2d = _collapse_leading_to_spatial_plane(image)
+    ref_2d = _collapse_leading_to_spatial_plane(reference_jax)
     image_processed, sky_processed = preprocess(
-        image, reference_jax, weight=preprocess_weight, horizon_r=horizon_r
+        image_2d, ref_2d, weight=preprocess_weight, horizon_r=horizon_r
     )
     flow = Flow.brox(
         image_processed,
@@ -732,7 +868,7 @@ def calcflow(
         gamma=gamma,
         scale_factor=scale_factor,
     )
-    dewarped = flow.apply(image)
+    dewarped = flow.apply_broadcast(image)
 
     if qa:
         bright_source_kwargs = None
@@ -744,14 +880,22 @@ def calcflow(
                 catalog_path=catalog_path,
                 n_sources=bright_source_flux_qa_count,
             )
+        bright_fn = None
+        if bright_source_flux_qa:
+            if int(np.asarray(dewarped).ndim) > 2:
+
+                def bright_fn(d, **kwargs):
+                    d2 = np.asarray(_collapse_leading_to_spatial_plane(jnp.asarray(d)))
+                    return log_bright_source_alignment(d2, **kwargs)
+
+            else:
+                bright_fn = log_bright_source_alignment
         score = runqa(
             image,
             reference_jax,
             flow,
             dewarped,
-            bright_source_flux_qa_fn=log_bright_source_alignment
-            if bright_source_flux_qa
-            else None,
+            bright_source_flux_qa_fn=bright_fn,
             bright_source_flux_qa_kwargs=bright_source_kwargs,
         )
     else:
@@ -767,8 +911,8 @@ def calcflow(
             else CatalogAstrometryQAParams()
         )
         qa_row = catalog_astrometry_metrics_pair(
-            np.asarray(image),
-            np.asarray(dewarped),
+            np.asarray(_collapse_leading_to_spatial_plane(jnp.asarray(image))),
+            np.asarray(_collapse_leading_to_spatial_plane(jnp.asarray(dewarped))),
             imwcs,
             catalog,
             catalog_path,
@@ -782,31 +926,24 @@ def calcflow(
         if outroot is None:
             raise ValueError("`outroot` must be provided when write=True or write_reference_sky=True")
         if (qa and qa_passed) or not qa:
-            # Preserve full input metadata and refresh WCS-related cards. If we
-            # reprojected onto a target grid, NAXIS1/NAXIS2 must match the new shape.
-            # Strip leftover NAXISn / WCS cards for axes >2 because the data we write
-            # is always 2D after squeezing (radio FITS often carries STOKES/FREQ on
-            # axes 3/4 which astropy's verify will reject when NAXIS=2).
-            output_header = input_header.copy()
-            _strip_extra_axis_cards(output_header, max_axis=2)
-            output_header.update(imwcs.to_header())
-            out_shape = np.asarray(dewarped).shape
-            output_header["NAXIS"] = 2
-            output_header["NAXIS1"] = int(out_shape[1])
-            output_header["NAXIS2"] = int(out_shape[0])
+            dewarped_arr = np.asarray(dewarped)
+            output_header = _build_preserved_output_header(
+                input_header, imwcs, tuple(int(s) for s in dewarped_arr.shape)
+            )
 
             if write:
                 outname = os.path.join(
                     outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
                 )
-                dewarped_arr = np.array(dewarped)
                 fits.writeto(outname, dewarped_arr, output_header)
 
             if write_reference_sky:
                 ref_outname = os.path.join(
                     outroot, os.path.basename(image_fn.replace(".fits", "_reference.fits"))
                 )
-                fits.writeto(ref_outname, np.asarray(reference_hdu.data), output_header)
+                fits.writeto(
+                    ref_outname, np.asarray(reference_hdu.data), output_header
+                )
         else:
             msg = f"image {image_fn} failed qa. Not writing outputs."
             print(msg)
