@@ -23,20 +23,25 @@ VLSSR_CATALOG = "/fastpool/zwhuang/catalogs/vlssr_radecpeak.txt"
 Catalog = Union[Literal["NVSS"], Literal["VLSSR"]]
 
 
-def reference_sources(catalog: Catalog, min_flux=0, path=None) -> Tuple[SkyCoord, Array]:
+def reference_sources(
+    catalog: Catalog, min_flux=0, max_flux=None, path=None
+) -> Tuple[SkyCoord, Array]:
     """
-    Returns the true-sky positions/fluxes associated with reference sources from the NVSS or VLSSR catalogs.
+    Return reference source positions and fluxes from NVSS or VLSSR.
+
+    ``min_flux`` and ``max_flux`` are flux-density bounds in Jy/beam. For VLSSR
+    these match ``PEAK INT`` directly. For NVSS, catalog ``f`` (mJy) is converted
+    to Jy/beam internally. Returned fluxes use the same Jy/beam convention. Pass
+    ``max_flux=None`` for no upper limit.
     """
     if catalog == "NVSS":
-        return reference_sources_nvss(min_flux, path=path)
+        return reference_sources_nvss(min_flux, max_flux=max_flux, path=path)
     elif catalog == "VLSSR":
-        return reference_sources_vlssr(min_flux, path=path)
+        return reference_sources_vlssr(min_flux, max_flux=max_flux, path=path)
     else:
         raise NotImplementedError(f"Unknown catalog: {catalog}")
 
 
-# Note: min_flux is in terms of mJy
-# sources are clipped at the max flux level (Jy)
 def theoretical_sky(
     imwcs,
     psf,
@@ -44,16 +49,19 @@ def theoretical_sky(
     catalog: Catalog = "VLSSR",
     img_size=4096,
     min_flux=0,
-    max_flux=35,
+    max_flux=10000,
     path=None
 ):
     """
-    Constructs a theoretical view of the sky using reference sources from a catalog.
-    The reference sources are plotted as point sources before being convolved with a given point-spread function.
-    A maximum flux is set in order to prevent extremely bright sources from overwhelming the rest of the image.
-    If desired, a flow field can be provided that perturbs the point sources before the convolution with the PSF.
+    Construct a theoretical view of the sky from a reference catalog.
+
+    Reference sources are deposited as point sources, optionally perturbed by
+    ``perturb``, then convolved with ``psf``. ``min_flux`` and ``max_flux`` are
+    in Jy/beam and applied when loading the catalog (see :func:`reference_sources`).
     """
-    positions, fluxes = reference_sources(catalog, min_flux=min_flux, path=path)
+    positions, fluxes = reference_sources(
+        catalog, min_flux=min_flux, max_flux=max_flux, path=path
+    )
     n_total = int(len(positions))
 
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
@@ -88,8 +96,6 @@ def theoretical_sky(
             f"img_size={img_size} wcs_center=({zen.ra.deg:.6f},{zen.dec.deg:.6f}) path={path!r}"
         )
 
-    # clip maximum flux (since PSF * large flux tends to overwhelm the image)
-    fluxes = jnp.clip(fluxes, 0, max_flux)
     # Drop any non-finite fluxes; a single NaN can poison the FFT convolution output.
     finite_flux = jnp.isfinite(fluxes)
     fluxes = fluxes[finite_flux]
@@ -179,7 +185,7 @@ def theoretical_sky_beam_function(
     catalog: Catalog = "VLSSR",
     img_size=4096,
     min_flux=0,
-    max_flux=35,
+    max_flux=1,
     path=None,
     beam_function: Union[Callable, None] = None,
     obs_date=None,
@@ -188,7 +194,10 @@ def theoretical_sky_beam_function(
     use_pb_correct: Union[bool, None] = None,
 ):
     """
-    Constructs theoretical sky with a configurable beam response map.
+    Construct a theoretical sky with a configurable beam response map.
+
+    ``min_flux`` and ``max_flux`` are in Jy/beam and applied when loading the catalog
+    (see :func:`reference_sources`).
 
     Beam options:
       - ``beam_function`` callable that accepts (ra_map, dec_map) and returns a (h, w) response map.
@@ -202,7 +211,9 @@ def theoretical_sky_beam_function(
     if use_pb_correct is not None:
         use_best_pb_model = use_pb_correct
 
-    positions, fluxes = reference_sources(catalog, min_flux=min_flux, path=path)
+    positions, fluxes = reference_sources(
+        catalog, min_flux=min_flux, max_flux=max_flux, path=path
+    )
     n_total = int(len(positions))
     positions_xy = jnp.stack(wcs.utils.skycoord_to_pixel(positions, imwcs), axis=1)
 
@@ -235,8 +246,6 @@ def theoretical_sky_beam_function(
             f"img_size={img_size} wcs_center=({zen.ra.deg:.6f},{zen.dec.deg:.6f}) path={path!r}"
         )
 
-    # clip maximum flux (since PSF * large flux tends to overwhelm the image)
-    fluxes = jnp.clip(fluxes, 0, max_flux)
     # Drop any non-finite fluxes; a single NaN can poison the FFT convolution output.
     finite_flux = jnp.isfinite(fluxes)
     fluxes = fluxes[finite_flux]
@@ -289,6 +298,12 @@ def theoretical_sky_beam_function(
 
     # taper off PSF using a gaussian
     psf_kernel = gkern(psf.shape[0], psf.shape[0] / 4) * psf
+    # Match radio image convention (Jy/beam): a point source of flux S should
+    # have a peak of ~S in the convolved image. This requires a PSF kernel with
+    # peak value 1.0; otherwise the model sky is scaled down by the kernel peak
+    # (often by the beam area in pixels).
+    peak = psf_kernel.max()
+    psf_kernel = jnp.where(peak > 0, psf_kernel / peak, psf_kernel)
 
     # Convolve point sources with PSF to generate theoretical sky.
     # using FFT as its much faster than a direct 4096x4096 by 4096x4096 convolution
@@ -297,23 +312,24 @@ def theoretical_sky_beam_function(
     return convolved
 
 
-# Returns the coordinates of sources in the reference catalog with at least the minimum flux (in mJy)
-# The default value is 270 mJy since the NVSS catalog was observed at 1.4 GHz, the LWA testing images
-# were taken at ~60 MHz with a lower-bound of ~2.7 Jy, and we assume a spectral index of -0.7.
-def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
+# NVSS column ``f`` is in mJy; ``min_flux``/``max_flux`` are in Jy/beam. Default min 0.27 Jy/beam
+# (~270 mJy at 1.4 GHz, scaled for low-frequency use with spectral index -0.7).
+def reference_sources_nvss(min_flux=0.27, max_flux=None, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = NVSS_CATALOG
     nvss = pd.read_csv(path, sep=r"\s+")
     sorted_nvss = nvss.sort_values(by=["f"])
 
-    # cut off refernce sources below a certain flux density
-    sorted_nvss = sorted_nvss[sorted_nvss["f"] >= min_flux]
+    min_flux_mjy = min_flux * 1000.0
+    sorted_nvss = sorted_nvss[sorted_nvss["f"] >= min_flux_mjy]
+    if max_flux is not None:
+        sorted_nvss = sorted_nvss[sorted_nvss["f"] <= max_flux * 1000.0]
 
     # get coordinates of each reference source
     nvss_orig = sorted_nvss[["rah", "ram", "ras", "dd", "dm", "ds"]].to_numpy()
 
-    # get flux of each reference source in Jy
-    fluxes = sorted_nvss[["f"]].to_numpy().squeeze() / 1000
+    # catalog ``f`` is mJy; return Jy/beam
+    fluxes = sorted_nvss[["f"]].to_numpy().squeeze() / 1000.0
 
     # manually convert HMS:DMS into degrees
     nvss_ra = (
@@ -332,17 +348,18 @@ def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
     return SkyCoord(positions, unit=(u.deg, u.deg)), jnp.array(fluxes)
 
 
-# min_flux should be in terms of mJy, but for some reason the VLSSR intensity
-# seems to be in terms of 0.1 mJys.
+# VLSSR column ``PEAK INT`` is in Jy/beam; ``min_flux``/``max_flux`` are in Jy/beam.
 @lru_cache
-def reference_sources_vlssr(min_flux=10, path=None) -> Tuple[SkyCoord, Array]:
+def reference_sources_vlssr(min_flux=0.0, max_flux=None, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = VLSSR_CATALOG
     vlssr = pd.read_csv(path, sep=" ")
     sorted_vlssr = vlssr.sort_values(by="PEAK INT")
-    sorted_vlssr = sorted_vlssr[sorted_vlssr["PEAK INT"] >= min_flux * 10]
+    sorted_vlssr = sorted_vlssr[sorted_vlssr["PEAK INT"] >= min_flux]
+    if max_flux is not None:
+        sorted_vlssr = sorted_vlssr[sorted_vlssr["PEAK INT"] <= max_flux]
 
-    fluxes = sorted_vlssr[["PEAK INT"]].to_numpy().squeeze() / 10
+    fluxes = sorted_vlssr[["PEAK INT"]].to_numpy().squeeze()
 
     positions = sorted_vlssr.to_numpy()[:, 0:2]
 

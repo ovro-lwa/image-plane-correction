@@ -542,7 +542,7 @@ def calcflow(
     write_reference_sky: bool = False,
     outroot=None,
     catalog="VLSSR",
-    max_flux=20,
+    max_flux=1000,
     catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
     preprocess_weight=1.5,
     horizon_elevation_deg: Optional[float] = 10.0,
@@ -572,6 +572,17 @@ def calcflow(
     frequency (Hz) are read from the image FITS header—``DATE-OBS`` / ``MJD-OBS``
     and ``RESTFRQ`` / ``RESTFREQ`` or a ``FREQ`` axis—and passed through so the
     beam model matches the observation.
+
+    Catalog reference sky
+    ---------------------
+    When no ``reference_sky`` / ``reference_sky_fn`` is supplied, a synthetic
+    reference map is built from ``catalog`` and ``catalog_path`` via
+    :func:`~image_plane_correction.catalogs.theoretical_sky_beam_function`.
+    ``max_flux`` is the upper flux-density bound in Jy/beam passed to
+    :func:`~image_plane_correction.catalogs.reference_sources`; catalog entries
+    above this value are excluded so very bright sources do not dominate the
+    model (default ``20`` Jy/beam). It has no effect when a precomputed reference sky
+    is supplied.
 
     When ``cleaned=True``, ``reference_sky`` is run through the same non-finite
     sanitization as the image after it is built or supplied (e.g. NaNs from

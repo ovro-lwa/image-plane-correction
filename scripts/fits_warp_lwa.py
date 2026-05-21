@@ -126,7 +126,7 @@ def image_plane_correction(img,
     logger.info(f"Found {len(sources)} sources")
 
     # we are using the NVSS catalog for reference sources
-    ref_sources, _ = reference_sources_nvss(min_flux=100)
+    ref_sources, _ = reference_sources_nvss(min_flux=0.1)
     logger.info(f"Using {len(ref_sources)} reference sources")
 
     # cross-match the sources found in the image with the reference sources

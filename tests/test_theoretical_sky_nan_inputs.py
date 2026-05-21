@@ -49,8 +49,8 @@ class TestTheoreticalSkyNanInputs(unittest.TestCase):
         positions = SkyCoord([180.0, 180.1] * u.deg, [45.0, 45.05] * u.deg)
         fluxes = np.array([1.0, np.nan], dtype=np.float32)
 
-        def fake_reference_sources(_catalog, min_flux=0, path=None):
-            _ = (min_flux, path)
+        def fake_reference_sources(_catalog, min_flux=0, max_flux=None, path=None):
+            _ = (min_flux, max_flux, path)
             return positions, fluxes
 
         with mock.patch.object(catalogs, "reference_sources", side_effect=fake_reference_sources):
