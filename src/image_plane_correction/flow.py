@@ -542,7 +542,7 @@ def calcflow(
     write_reference_sky: bool = False,
     outroot=None,
     catalog="VLSSR",
-    max_flux=1000,
+    max_flux=100,
     catalog_path="/home/claw/vlssr_radecpeak_unresolved.txt",
     preprocess_weight=1.5,
     horizon_elevation_deg: Optional[float] = 10.0,

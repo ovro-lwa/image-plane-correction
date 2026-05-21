@@ -49,7 +49,7 @@ def theoretical_sky(
     catalog: Catalog = "VLSSR",
     img_size=4096,
     min_flux=0,
-    max_flux=10000,
+    max_flux=100,
     path=None
 ):
     """
