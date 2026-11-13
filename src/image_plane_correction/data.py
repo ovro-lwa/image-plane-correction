@@ -11,7 +11,13 @@ from jaxtyping import Array
 from glob import glob
 
 
-def fits_image(path: str, squeeze: bool = True) -> Tuple[Array, wcs.WCS]:
+def fits_image(
+    path: str,
+    squeeze: bool = True,
+    *,
+    return_header: bool = False,
+    memmap: bool = True,
+):
     """
     Reads a fits image at a given path, returning the contained image and wcs data.
 
@@ -24,20 +30,30 @@ def fits_image(path: str, squeeze: bool = True) -> Tuple[Array, wcs.WCS]:
         the array (legacy behavior for mostly-2D radio images). If False, return the
         primary HDU array shape unchanged so true 3D/4D cubes stay N-dimensional; the
         returned WCS is still the 2D celestial sub-WCS for the sky plane.
+    return_header
+        If True, also return a copy of the primary HDU header (avoids a second open
+        via ``fits.getheader`` in callers such as ``calcflow``).
+    memmap
+        Open with memory mapping when possible so the file is not fully buffered up
+        front; data are still copied into a native-endian NumPy/JAX array.
     """
-    image = fits.open(path)
-    # JAX expects native-endian arrays; FITS data can be big-endian (e.g. '>f4').
-    raw = np.asarray(image[0].data)
-    image_np = np.squeeze(raw) if squeeze else raw
-    if image_np.dtype.byteorder in (">", "!"):
-        image_np = image_np.byteswap().view(image_np.dtype.newbyteorder("="))
-    image_data = jnp.array(image_np)
-    # Many OVRO-LWA products have extra non-celestial axes (e.g. STOKES/FREQ). Always return
-    # a 2D celestial WCS so downstream code (skycoord_to_pixel, pixel_to_skycoord, beam maps)
-    # behaves consistently on the sky plane (last two array axes).
-    full_wcs = wcs.WCS(image[0].header)
-    imwcs = full_wcs.celestial
-    image.close()
+    with fits.open(path, memmap=memmap) as hdul:
+        primary = hdul[0]
+        header = primary.header.copy()
+        # JAX expects native-endian arrays; FITS data can be big-endian (e.g. '>f4').
+        # Copy out of any memmap before the file handle closes.
+        raw = np.array(primary.data, copy=True)
+        image_np = np.squeeze(raw) if squeeze else raw
+        if image_np.dtype.byteorder in (">", "!"):
+            image_np = image_np.byteswap().view(image_np.dtype.newbyteorder("="))
+        image_data = jnp.array(image_np)
+        # Many OVRO-LWA products have extra non-celestial axes (e.g. STOKES/FREQ). Always return
+        # a 2D celestial WCS so downstream code (skycoord_to_pixel, pixel_to_skycoord, beam maps)
+        # behaves consistently on the sky plane (last two array axes).
+        full_wcs = wcs.WCS(header)
+        imwcs = full_wcs.celestial
+    if return_header:
+        return image_data, imwcs, header
     return image_data, imwcs
 
 
