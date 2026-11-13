@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "image-plane-correction"
 description = "Image-plane correction algorithms for the OVRO-LWA radio telescope"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 readme = "README.md"
 license = {file = "LICENSE"}
 version = "0.1"
 
 authors = [
+  {name = "Casey Law", email = "claw@astro.caltech.edu"},
   {name = "Zachary Huang", email = "zwhuang@caltech.edu"},
 ]
 
@@ -23,7 +24,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
 
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -32,16 +32,19 @@ classifiers = [
 ]
 
 dependencies = [
-  "numpy",
+  "numpy>=2",
   "pandas",
   "astropy",
 #  "bdsf",
   "scipy",
+  "h5py",
   "matplotlib",
   "multiprocess",
-  "jax",
+  "jax>=0.4.30,<0.7",
   "jaxtyping",
-  "interpax",
+  "equinox>=0.11,<0.13",
+  "interpax>=0.3.8,<0.4",
+  "reproject>=0.13",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +65,13 @@ Homepage = "https://github.com/ovro-lwa/image-plane-correction"
 Repository = "https://github.com/ovro-lwa/image-plane-correction"
 Issues = "https://github.com/ovro-lwa/image-plane-correction/issues"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["pb_correct", "extractor_pb_75"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.pyright]
 include = ["src", "scripts"]
 
@@ -69,5 +79,5 @@ include = ["src", "scripts"]
 src_paths = ["src", "scripts"]
 
 [tool.ruff]
-include = ["src/*.py", "scripts/*.py"]
+include = ["src/**/*.py", "scripts/*.py"]
 extend-include = ["notebooks/*.ipynb"]
