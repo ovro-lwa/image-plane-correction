@@ -1,0 +1,37 @@
+# systemd --user unit for watch_calcflow_warp.py (initial testing as user claw)
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/watch_calcflow_warp.service ~/.config/systemd/user/
+#   # edit WatchDir / WarpOutput / paths below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now watch_calcflow_warp.service
+#   journalctl --user -u watch_calcflow_warp -f
+#
+# Linger (optional, survive logout):
+#   loginctl enable-linger claw
+
+[Unit]
+Description=Watch *.fits.fz and write calcflow warp map
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/claw/code/image-plane-correction
+Environment=PYTHONPATH=/home/claw/code/image-plane-correction/src
+# Prefer the env that has jax/GPU + funpack on PATH:
+Environment=PATH=/opt/devel/claw/envs/py312/bin:/usr/bin
+ExecStart=/opt/devel/claw/envs/py312/bin/python \
+  /home/claw/code/image-plane-correction/scripts/watch_calcflow_warp.py \
+  --watch-dir /REPLACE/WITH/WATCH/DIR \
+  --output-dir /REPLACE/WITH/OUTPUT/DIR \
+  --warp-filename warp_55MHz.npz \
+  --cleaned \
+  --process-existing \
+  --poll-seconds 5 \
+  --settle-seconds 10
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

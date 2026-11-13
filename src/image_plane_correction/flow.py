@@ -778,9 +778,10 @@ def calcflow(
         )
         reference_hdu = fits.PrimaryHDU(data=np.asarray(ref_data), header=ref_header)
 
-    # Build the PSF kernel on the *active* (post-reproject) grid when needed.
+    # Build the PSF kernel only when we still need to synthesize reference_sky.
+    # Callers that pass a cached ``reference_sky`` skip catalog+PSF construction.
     psf = None
-    if cleaned:
+    if reference_hdu is None and cleaned:
         # Cleaned images use beam metadata from FITS headers; the kernel must live
         # at the same pixel scale as the image being analyzed. When ``psf_fn`` is
         # supplied, beam keys are read from that file's header; otherwise from the
@@ -811,7 +812,7 @@ def calcflow(
                 imwcs=imwcs,
                 shape=(size, size),
             )
-    elif psf_fn is not None:
+    elif reference_hdu is None and psf_fn is not None:
         psf_np, psf_wcs = data.fits_image(psf_fn)
         psf_np = np.asarray(psf_np)
         if target_size is not None and int(target_size) != int(source_image_spatial_shape[0]):
