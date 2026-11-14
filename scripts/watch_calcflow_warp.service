@@ -12,7 +12,7 @@
 #   loginctl enable-linger claw
 
 [Unit]
-Description=Watch *.fits.fz and write calcflow warp map
+Description=Watch *.fits.fz and write tip-tilt warp NPZ
 After=default.target
 
 [Service]

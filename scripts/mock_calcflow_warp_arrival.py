@@ -12,7 +12,7 @@ Example::
     PYTHONPATH=src python scripts/mock_calcflow_warp_arrival.py \\
         --source-dir /lustre/pipeline/.../55MHz \\
         --output-dir /lustre/claw/warps \\
-        --warp-filename warp_55MHz.fits \\
+        --warp-filename warp_55MHz.npz \\
         --cleaned --target-size 1024 --interval-seconds 10
 """
 
@@ -60,6 +60,10 @@ def run(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"--warp-filename must be a bare filename, not a path: {warp_filename}"
         )
+    if not warp_filename.lower().endswith(".npz"):
+        raise SystemExit(
+            f"--warp-filename must end with .npz (got {warp_filename!r})"
+        )
 
     fz_list = _collect_fz(
         Path(args.source_dir) if args.source_dir else None,
@@ -68,12 +72,18 @@ def run(args: argparse.Namespace) -> None:
     if not fz_list:
         raise SystemExit("No *.fits.fz files found to process")
 
+    reference_cache = (
+        None
+        if args.no_cache_reference_sky
+        else wcw.ReferenceSkyCache()
+    )
     LOG.info(
-        "Mocking %d arrivals every %.1fs -> output-dir=%s warp=%s",
+        "Mocking %d arrivals every %.1fs -> output-dir=%s warp=%s cache_ref=%s",
         len(fz_list),
         args.interval_seconds,
         output_dir,
         warp_filename,
+        reference_cache is not None,
     )
     for i, fz in enumerate(fz_list, start=1):
         LOG.info("[%d/%d] Appearing: %s", i, len(fz_list), fz.name)
@@ -93,6 +103,13 @@ def run(args: argparse.Namespace) -> None:
                 alpha=args.alpha,
                 gamma=args.gamma,
                 scale_factor=args.scale_factor,
+                reference_cache=reference_cache,
+                publish_tiptilt=args.publish_tiptilt,
+                ttl_sec=args.ttl_sec,
+                frequency_mhz=args.frequency_mhz,
+                az_step_deg=args.az_step_deg,
+                el_step_deg=args.el_step_deg,
+                el_min_deg=args.el_min_deg,
             )
         except Exception:
             LOG.exception("Failed processing %s", fz)
@@ -131,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--warp-filename",
         required=True,
-        help="Warp map filename inside --output-dir (e.g. warp_55MHz.fits)",
+        help="Warp map filename inside --output-dir (e.g. warp_55MHz.npz)",
     )
     p.add_argument(
         "--interval-seconds",
@@ -180,6 +197,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alpha", type=float, default=1.3)
     p.add_argument("--gamma", type=float, default=150.0)
     p.add_argument("--scale-factor", type=float, default=0.7)
+    p.add_argument(
+        "--no-cache-reference-sky",
+        action="store_true",
+        help="Rebuild theoretical reference_sky on every frame (default: reuse when WCS, target_size, and DATE-OBS/MJD-OBS match)",
+    )
+    p.add_argument(
+        "--publish-tiptilt",
+        dest="publish_tiptilt",
+        action="store_true",
+        default=True,
+        help="After writing the NPZ, call mnc.tiptilt.set_tiptilt (default: on)",
+    )
+    p.add_argument(
+        "--no-publish-tiptilt",
+        dest="publish_tiptilt",
+        action="store_false",
+        help="Write the NPZ only; do not publish to etcd",
+    )
+    p.add_argument(
+        "--ttl-sec",
+        type=float,
+        default=600.0,
+        help="Tip-tilt publication TTL in seconds (default: 600)",
+    )
+    p.add_argument(
+        "--frequency-mhz",
+        type=int,
+        default=None,
+        help="Subband MHz for etcd publish (default: parse _<N>MHz from --warp-filename)",
+    )
+    p.add_argument(
+        "--az-step-deg",
+        type=float,
+        default=5.0,
+        help="Azimuth grid step for tip-tilt NPZ (default: 5)",
+    )
+    p.add_argument(
+        "--el-step-deg",
+        type=float,
+        default=2.5,
+        help="Elevation grid step for tip-tilt NPZ (default: 2.5)",
+    )
+    p.add_argument(
+        "--el-min-deg",
+        type=float,
+        default=0.0,
+        help="Minimum elevation for tip-tilt NPZ grid (default: 0)",
+    )
     p.add_argument(
         "--fail-fast",
         action="store_true",

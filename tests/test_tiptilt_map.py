@@ -107,6 +107,39 @@ class TestTiptiltMap(unittest.TestCase):
             self.assertAlmostEqual(float(loaded["obstime_unix"]), obstime_unix)
             loaded.close()
 
+    def test_npz_schema_is_mnc_tiptilt_loadable(self):
+        """CI-safe: written NPZ has tip-tilt keys and loads via mnc when available."""
+        az = np.array([0.0, 90.0, 180.0, 270.0, 360.0], dtype=np.float64)
+        el = np.array([10.0, 45.0, 80.0], dtype=np.float64)
+        dra = np.arange(el.size * az.size, dtype=np.float64).reshape(el.size, az.size)
+        ddec = dra * 0.5
+        arrays = {
+            "az_deg": az,
+            "el_deg": el,
+            "dra_arcsec": dra,
+            "ddec_arcsec": ddec,
+            "obstime_unix": np.asarray(1_700_000_000.0, dtype=np.float64),
+        }
+        required = {"az_deg", "el_deg", "dra_arcsec", "ddec_arcsec", "obstime_unix"}
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "warp_55MHz.npz"
+            write_tiptilt_npz(out, arrays)
+            with open(out, "rb") as fh:
+                self.assertNotEqual(fh.read(6), b"SIMPLE")
+            loaded = np.load(out)
+            self.assertTrue(required.issubset(set(loaded.files)))
+            self.assertEqual(loaded["dra_arcsec"].shape, (el.size, az.size))
+            loaded.close()
+            try:
+                from mnc.tiptilt import _load_map
+            except Exception:
+                self.skipTest("mnc.tiptilt not importable in this environment")
+            grid = _load_map(str(out))
+            self.assertAlmostEqual(float(grid.obstime_unix), 1_700_000_000.0)
+            sample_dra, sample_ddec, outside = grid.sample(90.0, 45.0)
+            self.assertFalse(outside)
+            self.assertTrue(np.isfinite(sample_dra) and np.isfinite(sample_ddec))
+
 
 if __name__ == "__main__":
     unittest.main()

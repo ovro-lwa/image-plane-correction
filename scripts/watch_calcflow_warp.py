@@ -118,11 +118,33 @@ def _write_warp_npz(
 
 
 def _publish_tiptilt(warp_output: Path, *, ttl_sec: float, frequency_mhz: int) -> None:
-    """Publish ``warp_output`` absolute path to etcd for ``mnc.tiptilt`` consumers."""
-    from mnc.tiptilt import set_tiptilt
+    """
+    Publish ``warp_output`` absolute path to etcd for ``mnc.tiptilt`` consumers.
 
+    Import/etcd failures are logged and swallowed so local testing can still write
+    the NPZ when ``mnc``/``lwa_f`` or etcd are unavailable. Use
+    ``--no-publish-tiptilt`` to skip this path entirely.
+    """
     abs_path = str(warp_output.resolve())
-    set_tiptilt(abs_path, ttl_sec, frequency_mhz=frequency_mhz)
+    try:
+        from mnc.tiptilt import set_tiptilt
+    except ImportError as exc:
+        LOG.warning(
+            "Tip-tilt publish skipped (mnc.tiptilt import failed: %s). "
+            "NPZ was written to %s. Pass --no-publish-tiptilt to silence this.",
+            exc,
+            abs_path,
+        )
+        return
+    try:
+        set_tiptilt(abs_path, ttl_sec, frequency_mhz=frequency_mhz)
+    except Exception:
+        LOG.exception(
+            "Tip-tilt publish failed for %s (frequency_mhz=%d); NPZ is on disk",
+            abs_path,
+            frequency_mhz,
+        )
+        return
     LOG.info(
         "Published tip-tilt etcd entry frequency_mhz=%d path=%s ttl_sec=%s",
         frequency_mhz,
