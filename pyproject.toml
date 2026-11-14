@@ -40,10 +40,10 @@ dependencies = [
   "h5py",
   "matplotlib",
   "multiprocess",
-  "jax>=0.4.30,<0.7",
+  "jax>=0.5,<0.13",
   "jaxtyping",
-  "equinox>=0.11,<0.13",
-  "interpax>=0.3.8,<0.4",
+  "equinox>=0.13.2,<0.14",
+  "interpax>=0.3.16,<0.4",
   "reproject>=0.13",
 ]
 
@@ -54,6 +54,13 @@ dev = [
   "ruff",
   "pyright",
   "isort",
+]
+
+viz = [
+  "panel>=1.4",
+  "holoviews>=1.18",
+  "bokeh>=3.3",
+  "param>=2.0",
 ]
 
 gpu = [

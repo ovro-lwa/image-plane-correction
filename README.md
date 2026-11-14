@@ -23,6 +23,65 @@ For the sake of development, I would also recommend adding the `-e` flag to the 
 For GPU acceleration, ensure that JAX is installed with [CUDA support](https://jax.readthedocs.io/en/latest/installation.html#installation).
 As mentioned previously, OpenCV must be built from source for CUDA support and should be accessible as `cv2` for the optical flow code to work properly.
 
+# Live tip-tilt warp maps (`watch_calcflow_warp`)
+
+`scripts/watch_calcflow_warp.py` (and `scripts/mock_calcflow_warp_arrival.py`) poll
+pipeline `*.fits.fz` snapshots, run `calcflow`, and write a **tip-tilt named-array
+`.npz`** suitable for `mnc.tiptilt` (`az_deg`, `el_deg`, `dra_arcsec`,
+`ddec_arcsec`, `obstime_unix`). By default the absolute path is published with
+`mnc.tiptilt.set_tiptilt` under etcd `/mon/beamformer/tiptilt` (with a TTL; trackers
+fall back to zero shift if the key expires while the file may still exist on disk).
+
+```bash
+PYTHONPATH=src python scripts/watch_calcflow_warp.py \
+  --watch-dir /path/to/snapshots/55MHz \
+  --output-dir /path/to/warps \
+  --warp-filename warp_55MHz.npz \
+  --cleaned --process-existing
+```
+
+Use `--no-publish-tiptilt` to write the NPZ without updating etcd. Frequency for
+publish is taken from `_(\d+)MHz` in the warp filename (or `--frequency-mhz`).
+See `scripts/watch_calcflow_warp.service` for a systemd `--user` unit template.
+
+# Live dewarp map web app (`serve_dewarp_map`)
+
+Panel + HoloViews app showing the tip-tilt vector field in **zenithal equal-area**
+projection, with optional marks for active power beams. Requires viz extras
+(`pip install '.[viz]'`) plus runtime access to the warp NPZ; live beam marks need
+`mnc` / `etcd3` and beam pointing published by mnc
+`publish_commanded_pointing` under `/mon/beamformer/{N}/pointing`.
+
+```bash
+# Install viz stack once (panel, holoviews, bokeh, param):
+pip install -e '.[viz]'
+
+# Serve against a local NPZ (path preferred over etcd for the UI):
+PYTHONPATH=src python scripts/serve_dewarp_map.py \
+  --warp-path /fast/claw/warps/warp_55MHz.npz \
+  --frequency-mhz 55 \
+  --poll-seconds 3
+```
+
+Then open `http://127.0.0.1:5007/` once in a browser. Pass `--show` only if you
+want the script to open that URL for you — do not also click the printed URL
+(that opens a second tab). Omit `--warp-path` to resolve the map via
+`mnc.tiptilt.get_tiptilt_path(frequency_mhz)` when the tip-tilt catalog is
+published. Beam discovery uses `mnc.ezdr.discover_recorders(type='power')`.
+
+**Pointing display rule** (app frequency `F` MHz): use
+`value.commanded_by_frequency_mhz["F"]` when present, else `value.nominal`.
+Pointings older than `--max-pointing-age-sec` (default 120) are marked stale.
+Offline UI work without etcd: omit `--demo-pointings` for map-only, or pass a
+JSON file of `/mon/beamformer/{N}/pointing` payloads (`{"beams": {"N": {...}}}`)
+when you need synthetic marks. The checked-in
+`tests/fixtures/demo_pointings_55mhz.json` is empty by default.
+
+See `scripts/serve_dewarp_map.service` for a systemd `--user` unit template.
+**Dependencies to keep in mind:** tip-tilt etcd TTL (UI can still read `--warp-path`
+after TTL expiry); beam marks require an mnc build that publishes
+`/mon/beamformer/{N}/pointing` from `set_beam_pointing(s)`.
+
 # Tuning optical-flow Brox parameters (alpha / gamma)
 
 Dense optical flow uses OpenCV Brox parameters ``alpha`` (smoothness) and ``gamma``
