@@ -55,8 +55,8 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--stride",
         type=int,
-        default=1,
-        help="Quiver downsample stride on the az/el grid (default: 1)",
+        default=2,
+        help="Quiver downsample stride on the az/el grid (default: 2)",
     )
     parser.add_argument(
         "--central-az-deg",

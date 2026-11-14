@@ -363,7 +363,7 @@ class DewarpMapApp(param.Parameterized):
     warp_path = param.String(default="", doc="Path to tip-tilt .npz (empty → etcd resolve)")
     frequency_mhz = param.Integer(default=55, bounds=(1, 300), doc="App frequency MHz")
     poll_seconds = param.Number(default=3.0, bounds=(0.5, 60.0))
-    stride = param.Integer(default=1, bounds=(1, 32), doc="Grid downsample stride")
+    stride = param.Integer(default=2, bounds=(1, 32), doc="Grid downsample stride")
     central_az_deg = param.Number(
         default=0.0,
         softbounds=(0.0, 360.0),
@@ -697,13 +697,9 @@ class DewarpMapApp(param.Parameterized):
             self._plot_pane,
             sizing_mode="fixed",
         )
-        # Tip-tilt obstime/mtime/revision beside the beam pointing table.
+        # Tip-tilt obstime/mtime/revision beside the beam table; status below.
         meta_row = pn.Row(
-            pn.Column(
-                pn.panel(self.header_view),
-                pn.panel(self.status_view),
-                sizing_mode="stretch_width",
-            ),
+            pn.panel(self.header_view),
             pn.panel(self.beam_table_view),
             sizing_mode="stretch_width",
         )
@@ -714,6 +710,7 @@ class DewarpMapApp(param.Parameterized):
                 f"path `{self.warp_path or '(from etcd)'}`{demo_note}"
             ),
             meta_row,
+            pn.panel(self.status_view),
             plot_row,
             sizing_mode="stretch_width",
         )
@@ -730,7 +727,7 @@ def create_app(
     warp_path: Optional[PathLike] = None,
     frequency_mhz: int = 55,
     poll_seconds: float = 3.0,
-    stride: int = 1,
+    stride: int = 2,
     central_az_deg: float = 0.0,
     max_pointing_age_sec: float = 120.0,
     show_nominal_marks: bool = True,

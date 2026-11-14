@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -24,7 +25,35 @@ from image_plane_correction.viz.beam_overlay import (  # noqa: E402
 )
 from image_plane_correction.viz.dewarp_map_app import create_app  # noqa: E402
 
-FIXTURE = REPO_ROOT / "tests" / "fixtures" / "demo_pointings_55mhz.json"
+# Synthetic pointings for unit tests only (not the empty ops demo fixture).
+_TEST_POINTINGS = {
+    "beams": {
+        "1": {
+            "timestamp": 1890000000.0,
+            "unit": "deg",
+            "value": {"nominal": {"az_deg": 120.0, "el_deg": 45.0}},
+        },
+        "3": {
+            "timestamp": 1890000000.0,
+            "unit": "deg",
+            "value": {
+                "nominal": {"az_deg": 200.0, "el_deg": 55.0},
+                "commanded_by_frequency_mhz": {
+                    "55": {"az_deg": 201.5, "el_deg": 54.2}
+                },
+            },
+        },
+        "5": {
+            "timestamp": 1000.0,
+            "unit": "deg",
+            "value": {"nominal": {"az_deg": 30.0, "el_deg": 70.0}},
+        },
+    }
+}
+
+
+def _write_test_pointings(path: Path) -> None:
+    path.write_text(json.dumps(_TEST_POINTINGS), encoding="utf-8")
 
 
 def _write_fixture_npz(path: Path) -> None:
@@ -45,10 +74,12 @@ def _write_fixture_npz(path: Path) -> None:
 
 class TestBeamOverlay(unittest.TestCase):
     def test_load_demo_and_collect_rows(self):
-        demo = load_demo_pointings(FIXTURE)
-        self.assertEqual(set(demo), {1, 3, 5})
-
         with tempfile.TemporaryDirectory() as tmp:
+            pointing_path = Path(tmp) / "pointings.json"
+            _write_test_pointings(pointing_path)
+            demo = load_demo_pointings(pointing_path)
+            self.assertEqual(set(demo), {1, 3, 5})
+
             path = Path(tmp) / "warp_55MHz.npz"
             _write_fixture_npz(path)
             tip = load_tiptilt_npz(path)
@@ -73,7 +104,10 @@ class TestBeamOverlay(unittest.TestCase):
         self.assertEqual(by_beam[5].status, "stale")
 
     def test_missing_pointing_row(self):
-        demo = load_demo_pointings(FIXTURE)
+        with tempfile.TemporaryDirectory() as tmp:
+            pointing_path = Path(tmp) / "pointings.json"
+            _write_test_pointings(pointing_path)
+            demo = load_demo_pointings(pointing_path)
         rows = collect_beam_rows(
             frequency_mhz=55,
             tip=None,
@@ -89,8 +123,10 @@ class TestBeamOverlay(unittest.TestCase):
     def test_build_overlay_and_app_demo(self):
         pytest.importorskip("holoviews")
         pytest.importorskip("panel")
-        demo = load_demo_pointings(FIXTURE)
         with tempfile.TemporaryDirectory() as tmp:
+            pointing_path = Path(tmp) / "pointings.json"
+            _write_test_pointings(pointing_path)
+            demo = load_demo_pointings(pointing_path)
             path = Path(tmp) / "warp_55MHz.npz"
             _write_fixture_npz(path)
             tip = load_tiptilt_npz(path)
@@ -103,7 +139,7 @@ class TestBeamOverlay(unittest.TestCase):
             overlay = build_beam_overlay(rows, central_az_deg=0.0)
             self.assertIsNotNone(overlay)
 
-            fresh = load_demo_pointings(FIXTURE)
+            fresh = load_demo_pointings(pointing_path)
             for beam, rec in list(fresh.items()):
                 fresh[beam] = type(rec)(
                     beam=rec.beam,
@@ -117,7 +153,7 @@ class TestBeamOverlay(unittest.TestCase):
                 warp_path=path,
                 frequency_mhz=55,
                 poll_seconds=60.0,
-                demo_pointings_path=FIXTURE,
+                demo_pointings_path=pointing_path,
             )
             app._demo_pointings = fresh
             self.assertTrue(app.refresh_beams(force=True))
