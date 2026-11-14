@@ -36,8 +36,13 @@ PathLike = Union[str, Path]
 # Horizon radius in ZEA units: R = 2 sin(z/2) with z=90° → √2.
 _ZEA_R_HORIZON = np.sqrt(2.0)
 _ZEA_PLOT_LIM = _ZEA_R_HORIZON * 1.08
-_ZEA_WIDTH = 700
-_ZEA_HEIGHT = 700
+# Fixed square frame (do not stretch — that breaks equal aspect).
+_ZEA_WIDTH = 720
+_ZEA_HEIGHT = 720
+_ZEA_FRAME = 640
+# Display arrow length: 90th-percentile |shift| maps to this fraction of horizon R.
+_ARROW_REF_FRAC = 0.10
+_ARROW_MAX_FRAC = 0.22
 
 
 def wrap_az_offset_deg(az_deg: np.ndarray, central_az_deg: float = 0.0) -> np.ndarray:
@@ -155,63 +160,92 @@ def downsample_tiptilt_uv(
 
 
 def _zea_frame_opts(title: str = ""):
+    """Fixed square axes; xlim/ylim always the full sky disk."""
     return dict(
         title=title,
         width=_ZEA_WIDTH,
         height=_ZEA_HEIGHT,
+        frame_width=_ZEA_FRAME,
+        frame_height=_ZEA_FRAME,
         aspect="equal",
         xlim=(-_ZEA_PLOT_LIM, _ZEA_PLOT_LIM),
         ylim=(-_ZEA_PLOT_LIM, _ZEA_PLOT_LIM),
         xlabel="ZEA X (E when N up)",
         ylabel="ZEA Y (N up)",
+        # Keep user pan/zoom across DynamicMap updates when possible.
+        axiswise=False,
+        shared_axes=True,
     )
 
 
-def build_vectorfield(
+def _display_uv_from_tip_tilt(
+    az: np.ndarray,
+    el: np.ndarray,
+    dra: np.ndarray,
+    ddec: np.ndarray,
+    mag: np.ndarray,
+    *,
+    central_az_deg: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Return ``(x, y, u_disp, v_disp)`` with arrow lengths scaled for ZEA visibility.
+
+    Direction follows the ZEA projection of a small ``(daz, del)`` step; length
+    is set from celestial ``|shift|`` so typical arrows are ~10% of the horizon
+    radius (true projected displacements are ~10⁻³ of that and invisible).
+    """
+    x0, y0 = azel_to_zea(az, el, central_az_deg=central_az_deg)
+    x1, y1 = azel_to_zea(
+        az + dra / 3600.0,
+        el + ddec / 3600.0,
+        central_az_deg=central_az_deg,
+    )
+    u_raw = x1 - x0
+    v_raw = y1 - y0
+    raw_len = np.hypot(u_raw, v_raw)
+    # Fallback direction from (dra, ddec) if projection collapses (e.g. at zenith).
+    angle = np.arctan2(v_raw, u_raw)
+    tiny = raw_len < 1e-15
+    if np.any(tiny):
+        angle = np.where(tiny, np.arctan2(ddec, dra), angle)
+
+    positive = mag[np.isfinite(mag) & (mag > 0)]
+    if positive.size == 0:
+        mag_ref = 1.0
+    else:
+        mag_ref = float(np.nanpercentile(positive, 90))
+        if not np.isfinite(mag_ref) or mag_ref <= 0.0:
+            mag_ref = float(np.nanmedian(positive)) or 1.0
+
+    arrow_ref = _ARROW_REF_FRAC * _ZEA_R_HORIZON
+    arrow_max = _ARROW_MAX_FRAC * _ZEA_R_HORIZON
+    disp_len = np.clip((mag / mag_ref) * arrow_ref, 0.0, arrow_max)
+    disp_len = np.where(np.isfinite(disp_len), disp_len, 0.0)
+    u_disp = disp_len * np.cos(angle)
+    v_disp = disp_len * np.sin(angle)
+    return x0, y0, u_disp, v_disp
+
+
+def build_vector_element(
     tip: TipTiltMap,
     *,
     stride: int = 1,
-    title: str = "",
     central_az_deg: float = 0.0,
 ):
-    """
-    Build a zenithal equal-area az/el HoloViews overlay (horizon + graticule + vectors).
-
-    Tip-tilt ``(dra, ddec)`` arcsec are projected by finite-differencing the ZEA
-    map after treating them as small ``(daz, del)`` displacements (same display
-    convention as the prior rectangular / Mollweide quivers).
-    """
+    """Build only the tip-tilt ``VectorField`` element (no frame / graticule)."""
     import holoviews as hv
 
-    outline = zea_outline()
-    graticule = zea_graticule(central_az_deg=central_az_deg)
-    frame = _zea_frame_opts(title or "No finite tip-tilt samples")
     az, el, dra, ddec, mag = downsample_tiptilt_uv(tip, stride=stride)
     if az.size == 0:
-        empty = hv.VectorField(
+        return hv.VectorField(
             ([], [], [], []),
             kdims=["zea_x", "zea_y"],
             vdims=["Angle", "Magnitude"],
-        )
-        return (outline * graticule * empty).opts(
-            hv.opts.VectorField(
-                title=frame["title"],
-                xlabel=frame["xlabel"],
-                ylabel=frame["ylabel"],
-            ),
-            hv.opts.Overlay(**frame),
-        )
+        ).opts(alpha=0.0)
 
-    x0, y0 = azel_to_zea(az, el, central_az_deg=central_az_deg)
-    # Display convention: map celestial tip-tilt arcsec onto local az/el axes.
-    daz_deg = dra / 3600.0
-    del_deg = ddec / 3600.0
-    x1, y1 = azel_to_zea(
-        az + daz_deg, el + del_deg, central_az_deg=central_az_deg
+    x0, y0, u, v = _display_uv_from_tip_tilt(
+        az, el, dra, ddec, mag, central_az_deg=central_az_deg
     )
-    u = x1 - x0
-    v = y1 - y0
-
     field = hv.VectorField.from_uv(
         {
             "zea_x": x0,
@@ -225,20 +259,48 @@ def build_vectorfield(
         kdims=["zea_x", "zea_y"],
         vdims=["u", "v", "az_deg", "el_deg", "shift_arcsec"],
     )
-    # Color by celestial |shift|; arrow length from projected (u, v).
-    field = field.opts(
+    return field.opts(
         color="shift_arcsec",
         cmap="plasma",
         colorbar=True,
         magnitude="Magnitude",
-        rescale_lengths=True,
+        # Lengths already chosen in ZEA data units — do not re-normalize to 1.
+        rescale_lengths=False,
         clabel="|shift| (arcsec)",
         tools=["hover"],
-        xlabel=frame["xlabel"],
-        ylabel=frame["ylabel"],
+        line_width=1.5,
+    )
+
+
+def build_vectorfield(
+    tip: TipTiltMap,
+    *,
+    stride: int = 1,
+    title: str = "",
+    central_az_deg: float = 0.0,
+    beam_rows: Optional[List[BeamMapRow]] = None,
+    show_nominal_marks: bool = True,
+):
+    """
+    Build a zenithal equal-area az/el HoloViews overlay.
+
+    Horizon + graticule + tip-tilt vectors (+ optional beam marks).
+    """
+    import holoviews as hv
+
+    outline = zea_outline()
+    graticule = zea_graticule(central_az_deg=central_az_deg)
+    field = build_vector_element(
+        tip, stride=stride, central_az_deg=central_az_deg
     )
     overlay = outline * graticule * field
-    return overlay.opts(**{**frame, "title": title})
+    if beam_rows is not None:
+        overlay = overlay * build_beam_overlay(
+            beam_rows,
+            central_az_deg=central_az_deg,
+            show_nominal_when_commanded=show_nominal_marks,
+        )
+    return overlay.opts(**_zea_frame_opts(title))
 
 
 def _format_unix(ts: float) -> str:
@@ -336,7 +398,11 @@ class DewarpMapApp(param.Parameterized):
         self._beam_rows: List[BeamMapRow] = []
         self._beam_fp: tuple = ()
         self._plot_obj = None
+        self._plot_pipe = None
+        self._plot_dmap = None
+        self._plot_pane = None
         self._callback = None
+        self._poll_scheduled = False
         self._pn = None
         self._hv = None
         self._layout = None
@@ -474,32 +540,65 @@ class DewarpMapApp(param.Parameterized):
             LOG.exception("poll failed")
             self.status = f"Poll error: {exc}"
 
-    def _compose_plot(self) -> None:
-        """Rebuild ZEA vector field + beam overlays and bump revision."""
-        if self._tip is None:
-            self._plot_obj = None
-            self.revision = int(self.revision) + 1
-            return
+    def _plot_payload(self) -> dict:
         path = self._loaded_path
         mtime = self._loaded_mtime or float("nan")
+        obstime = (
+            float(self._tip.obstime_unix)
+            if self._tip is not None
+            else float("nan")
+        )
         title = (
             f"Tip-tilt {self.frequency_mhz} MHz | "
-            f"obstime {_format_unix(self._tip.obstime_unix)} | "
+            f"obstime {_format_unix(obstime)} | "
             f"mtime {_format_unix(mtime)} | "
             f"ZEA (up az={self.central_az_deg:g}°)"
         )
-        base = build_vectorfield(
-            self._tip,
-            stride=int(self.stride),
-            title=title,
-            central_az_deg=float(self.central_az_deg),
+        return {
+            "tip": self._tip,
+            "beam_rows": list(self._beam_rows),
+            "stride": int(self.stride),
+            "central_az_deg": float(self.central_az_deg),
+            "show_nominal_marks": bool(self.show_nominal_marks),
+            "title": title,
+        }
+
+    def _render_payload(self, data: Optional[dict] = None):
+        """Build overlay from a Pipe payload (DynamicMap; kwarg must be ``data``)."""
+        import holoviews as hv
+
+        payload = data
+        if not payload or payload.get("tip") is None:
+            empty = hv.Text(0.0, 0.0, "No map loaded yet")
+            return (zea_outline() * empty).opts(**_zea_frame_opts("No map loaded"))
+        return build_vectorfield(
+            payload["tip"],
+            stride=int(payload.get("stride", 1)),
+            title=str(payload.get("title") or ""),
+            central_az_deg=float(payload.get("central_az_deg", 0.0)),
+            beam_rows=payload.get("beam_rows") or [],
+            show_nominal_marks=bool(payload.get("show_nominal_marks", True)),
         )
-        beams = build_beam_overlay(
-            self._beam_rows,
-            central_az_deg=float(self.central_az_deg),
-            show_nominal_when_commanded=bool(self.show_nominal_marks),
-        )
-        self._plot_obj = (base * beams).opts(**_zea_frame_opts(title))
+
+    def _ensure_dynamic_plot(self) -> None:
+        """Create a single DynamicMap+Pipe so refresh updates data, not axes."""
+        if self._plot_dmap is not None:
+            return
+        import holoviews as hv
+        from holoviews.streams import Pipe
+
+        initial = self._plot_payload()
+        self._plot_pipe = Pipe(data=initial)
+        self._plot_dmap = hv.DynamicMap(self._render_payload, streams=[self._plot_pipe])
+        self._plot_obj = self._plot_dmap
+
+    def _compose_plot(self) -> None:
+        """Push latest map/beams into the DynamicMap Pipe (preserves x/y limits)."""
+        self._ensure_dynamic_plot()
+        payload = self._plot_payload()
+        assert self._plot_pipe is not None
+        self._plot_pipe.send(payload)
+        self._plot_obj = self._plot_dmap
         self.revision = int(self.revision) + 1
 
     @param.depends("stride", "central_az_deg", "show_nominal_marks", watch=True)
@@ -508,15 +607,6 @@ class DewarpMapApp(param.Parameterized):
         self.status = (
             f"Redraw stride={self.stride} central_az={self.central_az_deg:g}"
         )
-
-    @param.depends("revision", "stride", "central_az_deg", "show_nominal_marks")
-    def plot_view(self):
-        """Reactive HoloViews plot; re-runs when ``revision`` bumps."""
-        if self._plot_obj is None:
-            return self._hv.Text(0.5, 0.5, "No map loaded yet").opts(
-                width=_ZEA_WIDTH, height=_ZEA_HEIGHT
-            )
-        return self._plot_obj
 
     @param.depends("status")
     def status_view(self):
@@ -532,33 +622,36 @@ class DewarpMapApp(param.Parameterized):
         return f"### Beams\n\n{html}"
 
     def _start_periodic_callback(self) -> None:
+        """Schedule exactly one poll callback for this session via ``onload``.
+
+        Starting synchronously while the Bokeh document is held (layout build)
+        can register the same periodic-callback ID twice when the document is
+        later unheld — hence the deferral to ``pn.state.onload``.
+        """
         pn = self._pn
-        if self._callback is not None:
+        if getattr(self, "_poll_scheduled", False):
             return
+        self._poll_scheduled = True
         period_ms = int(max(0.5, float(self.poll_seconds)) * 1000)
 
         def _start():
             if self._callback is not None:
                 return
-            # Attach to the live Bokeh document for this session.
-            self._callback = pn.state.add_periodic_callback(
-                self.poll, period=period_ms, start=True
-            )
+            try:
+                self._callback = pn.state.add_periodic_callback(
+                    self.poll, period=period_ms, start=True
+                )
+            except ValueError as exc:
+                # Session already has this callback (e.g. duplicate onload).
+                LOG.warning("Poll callback not started: %s", exc)
+                return
             LOG.info(
                 "Started dewarp-map poll every %s ms (freq=%s)",
                 period_ms,
                 self.frequency_mhz,
             )
 
-        # If a document already exists, start now; otherwise wait for session onload.
-        try:
-            curdoc = pn.state.curdoc
-        except Exception:
-            curdoc = None
-        if curdoc is not None:
-            _start()
-        else:
-            pn.state.onload(_start)
+        pn.state.onload(_start)
 
     def panel(self):
         """Return (and cache) the Panel layout; schedule the poll callback."""
@@ -587,6 +680,15 @@ class DewarpMapApp(param.Parameterized):
             if self._demo_pointings is not None
             else " (live etcd pointings)"
         )
+        self._ensure_dynamic_plot()
+        # Fixed square pane — stretch_both was warping the ZEA disk.
+        self._plot_pane = pn.pane.HoloViews(
+            self._plot_dmap,
+            width=_ZEA_WIDTH,
+            height=_ZEA_HEIGHT,
+            sizing_mode="fixed",
+            linked_axes=False,
+        )
         self._layout = pn.Column(
             pn.pane.Markdown(
                 f"# Live dewarp / tip-tilt map\n"
@@ -597,7 +699,7 @@ class DewarpMapApp(param.Parameterized):
             pn.panel(self.header_view),
             controls,
             pn.panel(self.status_view),
-            pn.pane.HoloViews(self.plot_view, sizing_mode="stretch_both"),
+            self._plot_pane,
             pn.pane.Markdown(self.beam_table_view),
             sizing_mode="stretch_width",
         )

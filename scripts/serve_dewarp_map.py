@@ -117,24 +117,27 @@ def _session_layout(args: argparse.Namespace):
 _args = _parse_args()
 
 # ``panel serve`` imports this module per browser session — servable app attaches
-# its periodic callback via ``pn.state.onload`` / curdoc.
+# its periodic callback via ``pn.state.onload``.
 if __name__ != "__main__":
     _build_app(_args).servable(title=f"Dewarp map {_args.frequency_mhz} MHz")
 
 if __name__ == "__main__":
     import panel as pn
 
+    url = f"http://{_args.address}:{_args.port}/"
     print(
-        f"Serving dewarp map on http://{_args.address}:{_args.port}/dewarp "
+        f"Serving dewarp map at {url} "
         f"(warp={_args.warp_path or 'etcd'}, freq={_args.frequency_mhz} MHz, "
         f"poll={_args.poll_seconds}s)",
         file=sys.stderr,
     )
-    # Callable factory → one DewarpMapApp (and its periodic callback) per session.
+    # Single app at "/" (not a named {"dewarp": ...} dict) so --show opens one tab
+    # and there is no index→app second navigation.
     pn.serve(
-        {"dewarp": lambda: _session_layout(_args)},
+        lambda: _session_layout(_args),
         port=int(_args.port),
         address=_args.address,
         show=bool(_args.show),
         title=f"Dewarp map {_args.frequency_mhz} MHz",
+        websocket_origin=[f"{_args.address}:{_args.port}", f"localhost:{_args.port}"],
     )

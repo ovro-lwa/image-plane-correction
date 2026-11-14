@@ -22,7 +22,9 @@ if str(SRC_DIR) not in sys.path:
 from image_plane_correction.live_map import load_tiptilt_npz  # noqa: E402
 from image_plane_correction.viz.dewarp_map_app import (  # noqa: E402
     DewarpMapApp,
+    _ARROW_REF_FRAC,
     _ZEA_R_HORIZON,
+    _display_uv_from_tip_tilt,
     azel_to_zea,
     build_vectorfield,
     downsample_tiptilt_uv,
@@ -58,6 +60,20 @@ class TestVectorFieldHelpers(unittest.TestCase):
         self.assertAlmostEqual(float(xe), _ZEA_R_HORIZON, places=5)
         self.assertAlmostEqual(float(ye), 0.0, places=5)
 
+    def test_display_uv_scaled_for_visibility(self):
+        az = np.array([0.0, 90.0, 180.0])
+        el = np.array([45.0, 45.0, 45.0])
+        dra = np.array([100.0, 200.0, 400.0])
+        ddec = np.array([0.0, 0.0, 0.0])
+        mag = np.hypot(dra, ddec)
+        _x, _y, u, v = _display_uv_from_tip_tilt(
+            az, el, dra, ddec, mag, central_az_deg=0.0
+        )
+        disp = np.hypot(u, v)
+        # 90th percentile (~400) → ~ARROW_REF_FRAC * R; smaller values scale down.
+        self.assertGreater(float(np.max(disp)), 0.5 * _ARROW_REF_FRAC * _ZEA_R_HORIZON)
+        self.assertLess(float(np.max(disp)), 1.01 * 0.22 * _ZEA_R_HORIZON)
+
     def test_downsample_and_build(self):
         pytest.importorskip("holoviews")
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,6 +91,9 @@ class TestVectorFieldHelpers(unittest.TestCase):
             self.assertEqual(field.kdims[0].name, "zea_x")
             self.assertEqual(field.kdims[1].name, "zea_y")
             self.assertGreater(len(field), 0)
+            # Display lengths should be visible vs the horizon disk.
+            mag_disp = field.dimension_values("Magnitude")
+            self.assertGreater(float(np.nanmax(mag_disp)), 0.01)
 
     def test_app_reloads_on_mtime(self):
         pytest.importorskip("panel")
