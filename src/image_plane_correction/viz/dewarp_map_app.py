@@ -674,6 +674,8 @@ class DewarpMapApp(param.Parameterized):
                 "poll_seconds": {"disabled": True},
             },
             name="Dewarp map",
+            width=280,
+            sizing_mode="fixed",
         )
         demo_note = (
             " (demo pointings)"
@@ -689,18 +691,30 @@ class DewarpMapApp(param.Parameterized):
             sizing_mode="fixed",
             linked_axes=False,
         )
+        # Controls beside the ZEA plot (same row).
+        plot_row = pn.Row(
+            controls,
+            self._plot_pane,
+            sizing_mode="fixed",
+        )
+        # Tip-tilt obstime/mtime/revision beside the beam pointing table.
+        meta_row = pn.Row(
+            pn.Column(
+                pn.panel(self.header_view),
+                pn.panel(self.status_view),
+                sizing_mode="stretch_width",
+            ),
+            pn.panel(self.beam_table_view),
+            sizing_mode="stretch_width",
+        )
         self._layout = pn.Column(
             pn.pane.Markdown(
                 f"# Live dewarp / tip-tilt map\n"
                 f"Frequency **{self.frequency_mhz} MHz** — "
                 f"path `{self.warp_path or '(from etcd)'}`{demo_note}"
             ),
-            # pn.panel() wraps @param.depends methods so they re-render.
-            pn.panel(self.header_view),
-            controls,
-            pn.panel(self.status_view),
-            self._plot_pane,
-            pn.pane.Markdown(self.beam_table_view),
+            meta_row,
+            plot_row,
             sizing_mode="stretch_width",
         )
         self._start_periodic_callback()

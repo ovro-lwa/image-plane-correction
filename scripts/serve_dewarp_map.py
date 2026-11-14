@@ -90,7 +90,10 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Open a browser when running as __main__",
+        help=(
+            "Open the app URL once in a browser (do not also click the "
+            "printed URL, or you get two tabs)"
+        ),
     )
     return parser.parse_known_args(argv)[0]
 
@@ -122,6 +125,9 @@ if __name__ != "__main__":
     _build_app(_args).servable(title=f"Dewarp map {_args.frequency_mhz} MHz")
 
 if __name__ == "__main__":
+    import threading
+    import time
+
     import panel as pn
 
     url = f"http://{_args.address}:{_args.port}/"
@@ -131,13 +137,28 @@ if __name__ == "__main__":
         f"poll={_args.poll_seconds}s)",
         file=sys.stderr,
     )
-    # Single app at "/" (not a named {"dewarp": ...} dict) so --show opens one tab
-    # and there is no index→app second navigation.
+    # Always show=False. Panel's show=True calls server.show('/') and opens a
+    # tab; clicking the printed URL (or an IDE localhost preview) then opens a
+    # second tab. --show opens exactly once ourselves after the server is up.
+    if _args.show:
+        import webbrowser
+
+        def _open_once() -> None:
+            time.sleep(0.8)
+            webbrowser.open(url, new=0)
+            print(
+                f"Opened {url} once (--show). "
+                "Do not click the printed URL again or you get a second tab.",
+                file=sys.stderr,
+            )
+
+        threading.Thread(target=_open_once, daemon=True).start()
+
     pn.serve(
         lambda: _session_layout(_args),
         port=int(_args.port),
         address=_args.address,
-        show=bool(_args.show),
+        show=False,
         title=f"Dewarp map {_args.frequency_mhz} MHz",
         websocket_origin=[f"{_args.address}:{_args.port}", f"localhost:{_args.port}"],
     )
