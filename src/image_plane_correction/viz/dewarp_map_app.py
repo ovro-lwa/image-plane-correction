@@ -541,17 +541,19 @@ def build_vector_element(
         line_width=1.0,
     )
     # Invisible hit targets at sample centres (not along the arrow shaft).
+    # Empty ``label`` keeps the shared beam hover field from resolving to ???.
     hover_pts = hv.Points(
         {
             "moll_x": x0,
             "moll_y": y0,
+            "label": np.asarray([""] * int(az.size), dtype=object),
             "az_deg": az,
             "el_deg": el,
             "shift_arcmin": mag_am,
             "angle_deg": angle_deg,
         },
         kdims=["moll_x", "moll_y"],
-        vdims=["az_deg", "el_deg", "shift_arcmin", "angle_deg"],
+        vdims=["label", "az_deg", "el_deg", "shift_arcmin", "angle_deg"],
     ).opts(
         size=6,
         alpha=0.0,

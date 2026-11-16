@@ -30,6 +30,7 @@ PathLike = Union[str, Path]
 # through to numeral as a broken percent format.
 # Units live in the label so unicode degree/prime suffixes are not required.
 _HOVER_TOOLTIPS = [
+    ("beam", "@label"),
     ("az (deg)", "@az_deg{0.0}"),
     ("el (deg)", "@el_deg{0.0}"),
     ("|shift| (arcmin)", "@shift_arcmin{0.00}"),
@@ -48,17 +49,29 @@ def _hover_opts() -> dict:
 
 
 def _strip_text_from_hover(plot, _element) -> None:
-    """Keep Text/Labels out of HoverTool — they steal hits near beam marks."""
-    from bokeh.models import HoverTool, Text
+    """
+    Restrict HoverTool to glyphs that carry tip-tilt hover columns.
+
+    HoloViews Overlay/DynamicMap updates append *every* new glyph_renderer
+    (including Labels/Text) to the shared HoverTool. Text CDS only has
+    ``label``/x/y, so hovering beam name labels — especially small orange
+    nominal triangles — shows ``???`` for az/el/shift/angle.
+    """
+    from bokeh.models import HoverTool
 
     fig = plot.state
+    good = [
+        r
+        for r in fig.renderers
+        if getattr(getattr(r, "data_source", None), "data", None) is not None
+        and "az_deg" in r.data_source.data
+        and "el_deg" in r.data_source.data
+        and "shift_arcmin" in r.data_source.data
+        and "angle_deg" in r.data_source.data
+    ]
     for tool in fig.select(type=HoverTool):
-        rends = tool.renderers
-        if rends is None or rends == "auto":
-            continue
-        tool.renderers = [
-            r for r in rends if not isinstance(getattr(r, "glyph", None), Text)
-        ]
+        tool.renderers = list(good)
+        tool.tooltips = list(_HOVER_TOOLTIPS)
 
 
 @dataclass
@@ -397,7 +410,7 @@ def build_beam_overlay(
 
     layers = []
 
-    def _points(pts: list[dict], *, color, size, marker="circle"):
+    def _points(pts: list[dict], *, color, size, marker="circle", with_labels=True):
         if not pts:
             return None
         az = np.asarray([p["az"] for p in pts], dtype=np.float64)
@@ -427,9 +440,11 @@ def build_beam_overlay(
             marker=marker,
             **_hover_opts(),
         )
-        # Labels keep tools off; HoloViews Labels CDS only stores the text
-        # column, so if they join the shared Overlay HoverTool the tip-tilt
-        # fields resolve to "???". Stripping happens on the returned overlay.
+        if not with_labels:
+            # Nominal triangles are small; a nearby Labels glyph steals hits
+            # and (if re-attached to HoverTool on DynamicMap updates) shows ???.
+            # Identity is still available via the shared "beam" hover field.
+            return scatter
         labels_el = hv.Labels(
             {"moll_x": x, "moll_y": y, "label": labels},
             kdims=["moll_x", "moll_y"],
@@ -449,7 +464,10 @@ def build_beam_overlay(
     stale = _points(stale_pts, color="#888888", size=10)
     if stale is not None:
         layers.append(stale)
-    nom = _points(nom_pts, color="#e67e22", size=7, marker="triangle")
+    # No map Labels on nominal marks — hover carries "drN nom".
+    nom = _points(
+        nom_pts, color="#e67e22", size=10, marker="triangle", with_labels=False
+    )
     if nom is not None:
         layers.append(nom)
 
