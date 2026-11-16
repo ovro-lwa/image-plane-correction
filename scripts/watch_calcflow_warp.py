@@ -179,6 +179,7 @@ def process_fz(
     scale_factor: float,
     reference_cache: Optional[ReferenceSkyCache] = None,
     max_flux: float = 20.0,
+    horizon_elevation_deg: Optional[float] = 10.0,
     publish_tiptilt: bool = True,
     ttl_sec: float = 600.0,
     frequency_mhz: Optional[int] = None,
@@ -233,6 +234,7 @@ def process_fz(
         alpha=alpha,
         gamma=gamma,
         scale_factor=scale_factor,
+        horizon_elevation_deg=horizon_elevation_deg,
         target_size=target_size,
         catalog_qa=False,
         dewarp=False,
@@ -349,6 +351,7 @@ def run_loop(args: argparse.Namespace) -> None:
                 alpha=args.alpha,
                 gamma=args.gamma,
                 scale_factor=args.scale_factor,
+                horizon_elevation_deg=args.horizon_elevation_deg,
                 reference_cache=reference_cache,
                 publish_tiptilt=args.publish_tiptilt,
                 ttl_sec=args.ttl_sec,
@@ -464,6 +467,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alpha", type=float, default=1.3)
     p.add_argument("--gamma", type=float, default=150.0)
     p.add_argument("--scale-factor", type=float, default=0.7)
+    p.add_argument(
+        "--horizon-elevation-deg",
+        type=float,
+        default=10.0,
+        help=(
+            "Elevation cut (deg) for calcflow horizon_mask via horizon_r_normalized "
+            "(default: 10; raise to exclude more near-horizon signal from the flow solve)"
+        ),
+    )
     p.add_argument(
         "--no-cache-reference-sky",
         action="store_true",

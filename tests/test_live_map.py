@@ -21,6 +21,7 @@ from image_plane_correction.live_map import (  # noqa: E402
     display_az_el,
     is_pointing_stale,
     list_active_beam_numbers,
+    list_beam_numbers_from_pointing_keys,
     load_tiptilt_npz,
     parse_beam_pointing_payload,
     pointing_age_sec,
@@ -48,6 +49,11 @@ def _write_fixture_npz(path: Path) -> None:
     )
 
 
+class _FakeMeta:
+    def __init__(self, key: str):
+        self.key = key.encode() if isinstance(key, str) else key
+
+
 class FakeEtcd:
     def __init__(self, store):
         self.store = store
@@ -56,6 +62,11 @@ class FakeEtcd:
     def get(self, key):
         value = self.store.get(key)
         return (value, None)
+
+    def get_prefix(self, prefix):
+        for key, value in self.store.items():
+            if str(key).startswith(prefix):
+                yield value, _FakeMeta(str(key))
 
     def close(self):
         self.closed = True
@@ -154,6 +165,10 @@ class TestBeamPointingParse(unittest.TestCase):
         self.assertAlmostEqual(pointing_age_sec(record, now=1120.0), 120.0)
         self.assertFalse(is_pointing_stale(record, max_age_sec=120.0, now=1120.0))
         self.assertTrue(is_pointing_stale(record, max_age_sec=120.0, now=1120.1))
+        # Non-finite limit (UI "all") never marks stale.
+        self.assertFalse(
+            is_pointing_stale(record, max_age_sec=float("inf"), now=1.0e12)
+        )
 
     def test_read_beam_pointing_missing_and_present(self):
         client = FakeEtcd({})
@@ -188,6 +203,19 @@ class TestActiveBeams(unittest.TestCase):
 
         beams = list_active_beam_numbers(age_limit=90.0, discover_recorders=fake_discover)
         self.assertEqual(beams, [1, 3])
+
+    def test_list_beam_numbers_from_pointing_keys(self):
+        client = FakeEtcd(
+            {
+                "/mon/beamformer/1/pointing": b"{}",
+                "/mon/beamformer/3/pointing": b"{}",
+                "/mon/beamformer/2/status": b"{}",
+                "/mon/beamformer/tiptilt": b"{}",
+            }
+        )
+        self.assertEqual(
+            list_beam_numbers_from_pointing_keys(client=client), [1, 3]
+        )
 
 
 if __name__ == "__main__":

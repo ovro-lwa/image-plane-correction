@@ -22,12 +22,19 @@ if str(SRC_DIR) not in sys.path:
 from image_plane_correction.live_map import load_tiptilt_npz  # noqa: E402
 from image_plane_correction.viz.dewarp_map_app import (  # noqa: E402
     DewarpMapApp,
-    _ARROW_REF_FRAC,
-    _ZEA_R_HORIZON,
+    _ARROW_MAX_ARCMIN,
+    _ARROW_MAX_DISPLAY_DEG,
+    _ARROW_REF_ARCMIN,
+    _MOLL_X_MAX,
+    _arrow_max_display_length,
     _display_uv_from_tip_tilt,
-    azel_to_zea,
+    _grid_spacing_deg,
     build_vectorfield,
     downsample_tiptilt_uv,
+    radec_to_mollweide,
+    sample_spacing_deg,
+    sample_tiptilt_equal_area,
+    wrap_lon_offset_deg,
 )
 
 
@@ -48,52 +55,92 @@ def _write_fixture_npz(path: Path, *, scale: float = 1.0) -> None:
 
 
 class TestVectorFieldHelpers(unittest.TestCase):
-    def test_azel_to_zea_zenith_and_horizon(self):
-        # Zenith → origin; north horizon → +y at √2; east horizon → +x at √2.
-        xz, yz = azel_to_zea(0.0, 90.0, central_az_deg=0.0)
-        self.assertAlmostEqual(float(xz), 0.0, places=6)
-        self.assertAlmostEqual(float(yz), 0.0, places=6)
-        xn, yn = azel_to_zea(0.0, 0.0, central_az_deg=0.0)
-        self.assertAlmostEqual(float(xn), 0.0, places=6)
-        self.assertAlmostEqual(float(yn), _ZEA_R_HORIZON, places=5)
-        xe, ye = azel_to_zea(90.0, 0.0, central_az_deg=0.0)
-        self.assertAlmostEqual(float(xe), _ZEA_R_HORIZON, places=5)
-        self.assertAlmostEqual(float(ye), 0.0, places=5)
+    def test_radec_to_mollweide_center_and_ra_left(self):
+        # Default: RA=0 at plot centre; increasing RA moves left (negative x).
+        x0, y0 = radec_to_mollweide(0.0, 0.0, central_ra_deg=0.0)
+        self.assertAlmostEqual(float(x0), 0.0, places=6)
+        self.assertAlmostEqual(float(y0), 0.0, places=6)
+        x_east, _ = radec_to_mollweide(10.0, 0.0, central_ra_deg=0.0)
+        x_west, _ = radec_to_mollweide(350.0, 0.0, central_ra_deg=0.0)
+        self.assertLess(float(x_east), 0.0)
+        self.assertGreater(float(x_west), 0.0)
+        # Equator antipode near the limb.
+        x_anti, y_anti = radec_to_mollweide(180.0, 0.0, central_ra_deg=0.0)
+        self.assertAlmostEqual(float(y_anti), 0.0, places=5)
+        self.assertAlmostEqual(abs(float(x_anti)), _MOLL_X_MAX, places=4)
 
-    def test_display_uv_scaled_for_visibility(self):
+    def test_wrap_lon(self):
+        wrapped = wrap_lon_offset_deg(np.array([350.0, 10.0]), 0.0)
+        self.assertAlmostEqual(float(wrapped[0]), -10.0, places=6)
+        self.assertAlmostEqual(float(wrapped[1]), 10.0, places=6)
+
+    def test_display_uv_scaled_to_10deg_max(self):
         az = np.array([0.0, 90.0, 180.0])
         el = np.array([45.0, 45.0, 45.0])
-        dra = np.array([100.0, 200.0, 400.0])
+        # 5' / 10' / 20' — last one clips at _ARROW_MAX_ARCMIN for length.
+        dra = np.array([5.0, 10.0, 20.0]) * 60.0  # arcsec
         ddec = np.array([0.0, 0.0, 0.0])
         mag = np.hypot(dra, ddec)
-        _x, _y, u, v = _display_uv_from_tip_tilt(
-            az, el, dra, ddec, mag, central_az_deg=0.0
+        arrow_max = _arrow_max_display_length(_ARROW_MAX_DISPLAY_DEG)
+        _x, _y, u, v, mag_am = _display_uv_from_tip_tilt(
+            az,
+            el,
+            dra,
+            ddec,
+            mag,
+            obstime_unix=1_700_000_000.0,
+            central_ra_deg=0.0,
+            arrow_max_len=arrow_max,
         )
         disp = np.hypot(u, v)
-        # 90th percentile (~400) → ~ARROW_REF_FRAC * R; smaller values scale down.
-        self.assertGreater(float(np.max(disp)), 0.5 * _ARROW_REF_FRAC * _ZEA_R_HORIZON)
-        self.assertLess(float(np.max(disp)), 1.01 * 0.22 * _ZEA_R_HORIZON)
+        self.assertTrue(np.all(np.isfinite(mag_am)))
+        self.assertAlmostEqual(float(mag_am[0]), 5.0, places=5)
+        # 5' → half length when ref=10'; 10'+ → full 10°-on-sky display length.
+        self.assertAlmostEqual(float(disp[0]), 0.5 * arrow_max, places=5)
+        self.assertAlmostEqual(float(disp[1]), arrow_max, places=5)
+        self.assertLessEqual(float(np.max(disp)), arrow_max * 1.01)
+        cell = (2.0 * np.sqrt(2.0) / np.pi) * np.deg2rad(_ARROW_MAX_DISPLAY_DEG)
+        self.assertAlmostEqual(arrow_max, cell, places=6)
 
-    def test_downsample_and_build(self):
+    def test_grid_spacing_and_arrow_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "warp_55MHz.npz"
+            _write_fixture_npz(path)
+            tip = load_tiptilt_npz(path)
+            spacing = _grid_spacing_deg(tip, stride=2)
+            self.assertAlmostEqual(spacing, sample_spacing_deg(2), places=6)
+            self.assertAlmostEqual(spacing, 5.0, places=6)
+            maxlen = _arrow_max_display_length()
+            self.assertGreater(maxlen, 0.0)
+            self.assertEqual(_ARROW_MAX_DISPLAY_DEG, 20.0)
+            self.assertLessEqual(_ARROW_REF_ARCMIN, _ARROW_MAX_ARCMIN)
+
+    def test_equal_area_sample_and_build(self):
         pytest.importorskip("holoviews")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "warp_55MHz.npz"
             _write_fixture_npz(path)
             tip = load_tiptilt_npz(path)
-            az, el, dra, ddec, mag = downsample_tiptilt_uv(tip, stride=2)
+            az, el, dra, ddec, mag = sample_tiptilt_equal_area(tip, spacing_deg=10.0)
             self.assertEqual(az.ndim, 1)
             self.assertEqual(az.size, dra.size)
             self.assertTrue(np.all(np.isfinite(mag)))
+            # Fixture only covers a sky patch; still expect some hits.
             self.assertGreater(az.size, 0)
-            overlay = build_vectorfield(tip, stride=2)
-            # Overlay = outline + graticule curves + VectorField
+            # Legacy az/el stride path still available.
+            az2, _, _, _, _ = downsample_tiptilt_uv(tip, stride=2)
+            self.assertGreater(az2.size, 0)
+            overlay = build_vectorfield(tip, stride=4, central_ra_deg=0.0)
             field = overlay.VectorField.I
-            self.assertEqual(field.kdims[0].name, "zea_x")
-            self.assertEqual(field.kdims[1].name, "zea_y")
+            self.assertEqual(field.kdims[0].name, "moll_x")
+            self.assertEqual(field.kdims[1].name, "moll_y")
             self.assertGreater(len(field), 0)
-            # Display lengths should be visible vs the horizon disk.
             mag_disp = field.dimension_values("Magnitude")
-            self.assertGreater(float(np.nanmax(mag_disp)), 0.01)
+            self.assertGreater(float(np.nanmax(mag_disp)), 0.0)
+            hover = overlay.Points.I
+            shift = hover.dimension_values("shift_arcmin")
+            self.assertGreater(float(np.nanmax(shift)), 0.0)
+            self.assertTrue(any("Labels" in str(k) for k in overlay.keys()))
 
     def test_app_reloads_on_mtime(self):
         pytest.importorskip("panel")
@@ -114,7 +161,6 @@ class TestVectorFieldHelpers(unittest.TestCase):
 
             time.sleep(0.05)
             _write_fixture_npz(path, scale=2.0)
-            # Ensure mtime advances on coarse filesystems.
             path.touch()
             self.assertTrue(app.reload(force=False))
             self.assertNotEqual(app._loaded_mtime, first_mtime)
@@ -122,6 +168,7 @@ class TestVectorFieldHelpers(unittest.TestCase):
             app._compose_plot()
             self.assertGreater(app.revision, first_rev)
             self.assertIn("obstime", app.header)
+            self.assertIn("BMAJ", app.header)
             self.assertIsNotNone(app._plot_obj)
             layout = app.panel()
             self.assertIsNotNone(layout)

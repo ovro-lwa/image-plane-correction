@@ -120,6 +120,22 @@ class TestBeamOverlay(unittest.TestCase):
         self.assertEqual(by_beam[99].status, "no_pointing")
         self.assertIsNone(by_beam[99].display_az_deg)
 
+    def test_discover_failure_falls_back_to_pointing_keys(self):
+        def boom(*, type, age_limit):
+            raise RuntimeError("etcd too large")
+
+        rows = collect_beam_rows(
+            frequency_mhz=55,
+            tip=None,
+            max_age_sec=float("inf"),
+            discover_recorders=boom,
+            list_pointing_beams=lambda: [1, 3],
+            read_pointing=lambda beam: None,
+            now=1890000010.0,
+        )
+        self.assertEqual([r.beam for r in rows], [1, 3])
+        self.assertTrue(all(r.status == "no_pointing" for r in rows))
+
     def test_build_overlay_and_app_demo(self):
         pytest.importorskip("holoviews")
         pytest.importorskip("panel")
@@ -136,7 +152,11 @@ class TestBeamOverlay(unittest.TestCase):
                 demo_pointings=demo,
                 now=1890000010.0,
             )
-            overlay = build_beam_overlay(rows, central_az_deg=0.0)
+            overlay = build_beam_overlay(
+                rows,
+                obstime_unix=float(tip.obstime_unix),
+                central_ra_deg=0.0,
+            )
             self.assertIsNotNone(overlay)
 
             fresh = load_demo_pointings(pointing_path)

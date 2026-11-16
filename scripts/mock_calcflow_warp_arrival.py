@@ -103,6 +103,7 @@ def run(args: argparse.Namespace) -> None:
                 alpha=args.alpha,
                 gamma=args.gamma,
                 scale_factor=args.scale_factor,
+                horizon_elevation_deg=args.horizon_elevation_deg,
                 reference_cache=reference_cache,
                 publish_tiptilt=args.publish_tiptilt,
                 ttl_sec=args.ttl_sec,
@@ -197,6 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alpha", type=float, default=1.3)
     p.add_argument("--gamma", type=float, default=150.0)
     p.add_argument("--scale-factor", type=float, default=0.7)
+    p.add_argument(
+        "--horizon-elevation-deg",
+        type=float,
+        default=10.0,
+        help=(
+            "Elevation cut (deg) for calcflow horizon_mask via horizon_r_normalized "
+            "(default: 10)"
+        ),
+    )
     p.add_argument(
         "--no-cache-reference-sky",
         action="store_true",

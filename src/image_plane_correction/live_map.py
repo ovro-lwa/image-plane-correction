@@ -267,10 +267,16 @@ def is_pointing_stale(
     max_age_sec: float = 120.0,
     now: Optional[float] = None,
 ) -> bool:
-    """True when pointing age exceeds ``max_age_sec``."""
-    if not (max_age_sec > 0.0):
-        raise ValueError("max_age_sec must be positive")
-    return pointing_age_sec(record, now=now) > float(max_age_sec)
+    """True when pointing age exceeds ``max_age_sec``.
+
+    Non-finite ``max_age_sec`` (e.g. ``inf`` / UI ``all``) means never stale.
+    """
+    age_limit = float(max_age_sec)
+    if not np.isfinite(age_limit):
+        return False
+    if not (age_limit > 0.0):
+        raise ValueError("max_age_sec must be positive or non-finite (all)")
+    return pointing_age_sec(record, now=now) > age_limit
 
 
 def read_beam_pointing(
@@ -348,3 +354,45 @@ def list_active_beam_numbers(
         seen.add(beam)
         beams.append(beam)
     return sorted(beams)
+
+
+_POINTING_KEY = re.compile(r"^/mon/beamformer/(\d+)/pointing$")
+
+
+def list_beam_numbers_from_pointing_keys(*, client=None) -> list:
+    """
+    Beam numbers that have a ``/mon/beamformer/{N}/pointing`` etcd key.
+
+    Fallback when ``discover_recorders`` fails (e.g. etcd message-size limits).
+    ``client`` is an etcd-like object with ``get_prefix`` (and optional ``close``).
+    """
+    own = False
+    etcd = client
+    try:
+        if etcd is None:
+            import etcd3
+            from mnc.common import ETCD_HOST, ETCD_PORT
+
+            etcd = etcd3.client(host=ETCD_HOST, port=ETCD_PORT)
+            own = True
+        beams = []
+        seen = set()
+        for _value, meta in etcd.get_prefix("/mon/beamformer/"):
+            key = meta.key.decode() if hasattr(meta.key, "decode") else str(meta.key)
+            matched = _POINTING_KEY.match(key)
+            if matched is None:
+                continue
+            beam = int(matched.group(1))
+            if beam in seen:
+                continue
+            seen.add(beam)
+            beams.append(beam)
+        return sorted(beams)
+    except Exception:
+        return []
+    finally:
+        if own and etcd is not None:
+            try:
+                etcd.close()
+            except Exception:
+                pass

@@ -29,7 +29,12 @@ ExecStart=/opt/devel/claw/envs/py312/bin/python \
   --cleaned \
   --process-existing \
   --poll-seconds 5 \
-  --settle-seconds 10
+  --settle-seconds 10 \
+  --alpha 10 \
+  --gamma 50 \
+  --scale-factor 0.7 \
+  --horizon-elevation-deg 20 \
+  --el-min-deg 20
 Restart=on-failure
 RestartSec=30
 

@@ -55,14 +55,20 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--stride",
         type=int,
-        default=2,
-        help="Quiver downsample stride on the az/el grid (default: 2)",
+        default=3,
+        help="Equal-area sample spacing multiplier (default: 3 → 7.5°)",
+    )
+    parser.add_argument(
+        "--central-ra-deg",
+        type=float,
+        default=0.0,
+        help="Mollweide central RA in deg (default: 0 → RA=0 at centre)",
     )
     parser.add_argument(
         "--central-az-deg",
         type=float,
-        default=0.0,
-        help="ZEA up-azimuth in deg (0=N up, 90=E up, 180=S up; default: 0)",
+        default=None,
+        help=argparse.SUPPRESS,  # deprecated ZEA control
     )
     parser.add_argument(
         "--demo-pointings",
@@ -106,6 +112,7 @@ def _build_app(args: argparse.Namespace):
         frequency_mhz=args.frequency_mhz,
         poll_seconds=args.poll_seconds,
         stride=args.stride,
+        central_ra_deg=args.central_ra_deg,
         central_az_deg=args.central_az_deg,
         max_pointing_age_sec=args.max_pointing_age_sec,
         demo_pointings_path=args.demo_pointings,
