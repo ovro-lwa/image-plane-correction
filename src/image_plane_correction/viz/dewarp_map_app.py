@@ -645,7 +645,7 @@ def _format_age_sec(age_sec: Optional[float]) -> str:
 
 
 def _beam_table_html(rows: List[BeamMapRow]) -> str:
-    """HTML beam table; stale rows are greyed (age threshold set by the slider)."""
+    """HTML tip-tilt correction table; stale warp rows are greyed."""
     if not rows:
         return "<em>No active beams</em>"
 
@@ -658,7 +658,6 @@ def _beam_table_html(rows: List[BeamMapRow]) -> str:
         "<th style='text-align:right;padding:2px 8px'>el</th>"
         "<th style='text-align:right;padding:2px 8px'>nom az</th>"
         "<th style='text-align:right;padding:2px 8px'>nom el</th>"
-        "<th style='text-align:right;padding:2px 8px'>cmd?</th>"
         "<th style='text-align:right;padding:2px 8px'>dra′</th>"
         "<th style='text-align:right;padding:2px 8px'>ddec′</th>"
         "<th style='text-align:right;padding:2px 8px'>|shift|′</th>"
@@ -671,23 +670,18 @@ def _beam_table_html(rows: List[BeamMapRow]) -> str:
         shift_am = None if row.shift_arcsec is None else row.shift_arcsec / 60.0
         if row.status == "stale":
             row_style = "background:#eeeeee;color:#777777"
-            status_txt = "stale"
-        elif row.status == "no_pointing":
+        elif row.status == "not applied":
             row_style = "background:#f5f5f5;color:#666"
-            status_txt = "no pointing"
         else:
             row_style = ""
-            status_txt = "ok"
         lines.append(
             f"<tr style='{row_style}'>"
             f"<td style='padding:2px 8px'>dr{row.beam}</td>"
-            f"<td style='padding:2px 8px'>{status_txt}</td>"
+            f"<td style='padding:2px 8px'>{row.status}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(row.display_az_deg)}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(row.display_el_deg)}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(row.nominal_az_deg)}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(row.nominal_el_deg)}</td>"
-            f"<td style='text-align:right;padding:2px 8px'>"
-            f"{'yes' if row.uses_commanded else '—'}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(dra_am)}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(ddec_am)}</td>"
             f"<td style='text-align:right;padding:2px 8px'>{_fmt_opt(shift_am)}</td>"
@@ -732,8 +726,11 @@ class DewarpMapApp(param.Parameterized):
     max_pointing_age_sec = param.Selector(
         default=120.0,
         objects=list(_POINTING_AGE_SLIDER_OPTIONS.values()),
-        label="Max pointing age sec",
-        doc="Pointing older than this is marked stale; 'all' = never stale",
+        label="Max warp age sec",
+        doc=(
+            "Warp tip-tilt correction older than this is marked stale; "
+            "'all' = never stale"
+        ),
     )
     show_nominal_marks = param.Boolean(
         default=True,
@@ -988,15 +985,15 @@ class DewarpMapApp(param.Parameterized):
                 self._compose_plot()
             path = self._loaded_path
             name = path.name if path is not None else "?"
-            n_ok = sum(1 for r in self._beam_rows if r.status == "ok")
+            n_applied = sum(1 for r in self._beam_rows if r.status == "applied")
             n_stale = sum(1 for r in self._beam_rows if r.status == "stale")
-            n_miss = sum(1 for r in self._beam_rows if r.status == "no_pointing")
+            n_not = sum(1 for r in self._beam_rows if r.status == "not applied")
             mode = "demo" if self._demo_pointings is not None else "etcd"
             n_bands = len(self.available_subbands_mhz)
             self.status = (
                 f"Watching {name}  subband={self.frequency_mhz} MHz  "
-                f"available={n_bands}/{MAX_WARP_SUBBANDS}  beams[{mode}]="
-                f"{n_ok} ok/{n_stale} stale/{n_miss} missing  "
+                f"available={n_bands}/{MAX_WARP_SUBBANDS}  corrections[{mode}]="
+                f"{n_applied} applied/{n_not} not applied/{n_stale} stale  "
                 f"obstime={_format_unix(self._loaded_obstime or float('nan'))}  "
                 f"poll@{_format_unix(time.time())}"
             )
@@ -1103,9 +1100,10 @@ class DewarpMapApp(param.Parameterized):
     def beam_table_view(self):
         html = self.beam_table_html or "<em>No active beams</em>"
         return (
-            f"### Beamformer pointings\n\n"
-            f"Tip-tilt correction sampled at each active beam "
-            f"(subband **{self.frequency_mhz} MHz**).\n\n"
+            f"### Beamformer tiptilt corrections\n\n"
+            f"Subband **{self.frequency_mhz} MHz**. "
+            f"Status is **applied** / **not applied** / **stale**; "
+            f"**age** is the warp correction age.\n\n"
             f"{html}"
         )
 
@@ -1201,7 +1199,7 @@ class DewarpMapApp(param.Parameterized):
                 },
                 "poll_seconds": {"disabled": True},
                 "max_pointing_age_sec": pn.widgets.DiscreteSlider(
-                    label="Max pointing age sec",
+                    label="Max warp age sec",
                     options=dict(_POINTING_AGE_SLIDER_OPTIONS),
                     value=120.0,
                 ),

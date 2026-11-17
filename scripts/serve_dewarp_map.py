@@ -108,7 +108,7 @@ def _parse_args(argv=None):
         "--max-pointing-age-sec",
         type=float,
         default=120.0,
-        help="Mark pointing stale when older than this (default: 120)",
+        help="Mark warp tip-tilt correction stale when older than this (default: 120)",
     )
     parser.add_argument(
         "--port",

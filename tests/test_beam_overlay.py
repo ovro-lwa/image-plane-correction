@@ -83,8 +83,8 @@ class TestBeamOverlay(unittest.TestCase):
             path = Path(tmp) / "warp_55MHz.npz"
             _write_fixture_npz(path)
             tip = load_tiptilt_npz(path)
-            # Freeze "now" so beam 5 (timestamp=1000) is stale, 1/3 are fresh.
-            now = 1890000010.0
+            # Warp obstime is 1.7e9; freeze now so the map is fresh (<120 s).
+            now = 1_700_000_010.0
             rows = collect_beam_rows(
                 frequency_mhz=55,
                 tip=tip,
@@ -93,15 +93,28 @@ class TestBeamOverlay(unittest.TestCase):
                 now=now,
             )
         by_beam = {r.beam: r for r in rows}
-        self.assertEqual(by_beam[1].status, "ok")
+        self.assertEqual(by_beam[1].status, "not applied")
         self.assertFalse(by_beam[1].uses_commanded)
         self.assertEqual(by_beam[1].display_az_deg, 120.0)
-        self.assertEqual(by_beam[3].status, "ok")
+        self.assertAlmostEqual(by_beam[1].age_sec, 10.0, places=3)
+        self.assertEqual(by_beam[3].status, "applied")
         self.assertTrue(by_beam[3].uses_commanded)
         self.assertEqual(by_beam[3].display_az_deg, 201.5)
         self.assertEqual(by_beam[3].nominal_az_deg, 200.0)
         self.assertIsNotNone(by_beam[3].shift_arcsec)
-        self.assertEqual(by_beam[5].status, "stale")
+        # Beam 5 has an old pointing timestamp but a fresh warp → not applied.
+        self.assertEqual(by_beam[5].status, "not applied")
+
+        # Same rows with an aged-out warp → stale (age is warp correction age).
+        stale_rows = collect_beam_rows(
+            frequency_mhz=55,
+            tip=tip,
+            max_age_sec=120.0,
+            demo_pointings=demo,
+            now=1_700_000_200.0,
+        )
+        self.assertTrue(all(r.status == "stale" for r in stale_rows))
+        self.assertAlmostEqual(stale_rows[0].age_sec, 200.0, places=3)
 
     def test_missing_pointing_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,9 +129,10 @@ class TestBeamOverlay(unittest.TestCase):
             now=1890000010.0,
         )
         by_beam = {r.beam: r for r in rows}
-        self.assertEqual(by_beam[1].status, "ok")
-        self.assertEqual(by_beam[99].status, "no_pointing")
+        self.assertEqual(by_beam[1].status, "not applied")
+        self.assertEqual(by_beam[99].status, "not applied")
         self.assertIsNone(by_beam[99].display_az_deg)
+        self.assertIsNone(by_beam[99].age_sec)
 
     def test_discover_failure_falls_back_to_pointing_keys(self):
         def boom(*, type, age_limit):
@@ -134,7 +148,7 @@ class TestBeamOverlay(unittest.TestCase):
             now=1890000010.0,
         )
         self.assertEqual([r.beam for r in rows], [1, 3])
-        self.assertTrue(all(r.status == "no_pointing" for r in rows))
+        self.assertTrue(all(r.status == "not applied" for r in rows))
 
     def test_build_overlay_and_app_demo(self):
         pytest.importorskip("holoviews")

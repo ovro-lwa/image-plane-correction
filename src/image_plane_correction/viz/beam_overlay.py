@@ -14,11 +14,9 @@ from image_plane_correction.live_map import (
     BeamPointingRecord,
     TipTiltMap,
     display_az_el,
-    is_pointing_stale,
     list_active_beam_numbers,
     list_beam_numbers_from_pointing_keys,
     parse_beam_pointing_payload,
-    pointing_age_sec,
     read_beam_pointing,
 )
 
@@ -74,12 +72,57 @@ def _strip_text_from_hover(plot, _element) -> None:
         tool.tooltips = list(_HOVER_TOOLTIPS)
 
 
+# Tip-tilt correction status shown in the beam table / overlays.
+STATUS_APPLIED = "applied"
+STATUS_NOT_APPLIED = "not applied"
+STATUS_STALE = "stale"
+
+
+def _warp_correction_age_sec(
+    tip: Optional[TipTiltMap], *, now: float
+) -> Optional[float]:
+    """Age of the loaded tip-tilt warp correction (obstime, else file mtime)."""
+    if tip is None:
+        return None
+    epoch = float(tip.obstime_unix)
+    if not np.isfinite(epoch):
+        epoch = float(tip.mtime)
+    if not np.isfinite(epoch):
+        return None
+    return max(0.0, float(now) - epoch)
+
+
+def _correction_status(
+    *,
+    tip: Optional[TipTiltMap],
+    uses_commanded: bool,
+    warp_age_sec: Optional[float],
+    max_age_sec: float,
+) -> str:
+    """
+    Classify tip-tilt correction state for a beam.
+
+    ``stale`` — warp map older than ``max_age_sec`` (when the limit is finite).
+    ``applied`` — fresh warp and beamformer has commanded tip-tilt for the subband.
+    ``not applied`` — no commanded tip-tilt (or no warp map yet).
+    """
+    age_limit = float(max_age_sec)
+    if tip is not None and np.isfinite(age_limit):
+        if age_limit <= 0.0:
+            raise ValueError("max_age_sec must be positive or non-finite (all)")
+        if warp_age_sec is not None and warp_age_sec > age_limit:
+            return STATUS_STALE
+    if uses_commanded and tip is not None:
+        return STATUS_APPLIED
+    return STATUS_NOT_APPLIED
+
+
 @dataclass
 class BeamMapRow:
     """One beam's display state for the map table / overlays."""
 
     beam: int
-    status: str  # ok | stale | no_pointing
+    status: str  # applied | not applied | stale
     display_az_deg: Optional[float]
     display_el_deg: Optional[float]
     nominal_az_deg: Optional[float]
@@ -90,7 +133,7 @@ class BeamMapRow:
     dra_arcsec: Optional[float]
     ddec_arcsec: Optional[float]
     shift_arcsec: Optional[float]
-    age_sec: Optional[float]
+    age_sec: Optional[float]  # warp correction age (not pointing age)
     outside_map: bool = False
 
     def fingerprint(self) -> tuple:
@@ -165,8 +208,6 @@ def beam_row_from_record(
     """Build a :class:`BeamMapRow` from a parsed pointing record."""
     if now is None:
         now = time.time()
-    age = pointing_age_sec(record, now=now)
-    stale = is_pointing_stale(record, max_age_sec=max_age_sec, now=now)
     disp_az, disp_el = display_az_el(record, frequency_mhz)
     commanded = record.commanded_by_frequency_mhz.get(frequency_mhz)
     uses_commanded = commanded is not None
@@ -183,9 +224,16 @@ def beam_row_from_record(
         else:
             outside = True
 
+    warp_age = _warp_correction_age_sec(tip, now=float(now))
+    status = _correction_status(
+        tip=tip,
+        uses_commanded=uses_commanded,
+        warp_age_sec=warp_age,
+        max_age_sec=max_age_sec,
+    )
     return BeamMapRow(
         beam=record.beam,
-        status="stale" if stale else "ok",
+        status=status,
         display_az_deg=float(disp_az),
         display_el_deg=float(disp_el),
         nominal_az_deg=float(record.nominal_az_deg),
@@ -196,15 +244,30 @@ def beam_row_from_record(
         dra_arcsec=dra,
         ddec_arcsec=ddec,
         shift_arcsec=shift,
-        age_sec=float(age),
+        age_sec=warp_age,
         outside_map=outside,
     )
 
 
-def beam_row_missing(beam: int) -> BeamMapRow:
+def beam_row_missing(
+    beam: int,
+    *,
+    tip: Optional[TipTiltMap] = None,
+    max_age_sec: float = 120.0,
+    now: Optional[float] = None,
+) -> BeamMapRow:
+    if now is None:
+        now = time.time()
+    warp_age = _warp_correction_age_sec(tip, now=float(now))
+    status = _correction_status(
+        tip=tip,
+        uses_commanded=False,
+        warp_age_sec=warp_age,
+        max_age_sec=max_age_sec,
+    )
     return BeamMapRow(
         beam=beam,
-        status="no_pointing",
+        status=status,
         display_az_deg=None,
         display_el_deg=None,
         nominal_az_deg=None,
@@ -215,7 +278,7 @@ def beam_row_missing(beam: int) -> BeamMapRow:
         dra_arcsec=None,
         ddec_arcsec=None,
         shift_arcsec=None,
-        age_sec=None,
+        age_sec=warp_age,
         outside_map=False,
     )
 
@@ -256,7 +319,11 @@ def collect_beam_rows(
         for beam in beams:
             record = demo_pointings.get(beam)
             if record is None:
-                rows.append(beam_row_missing(beam))
+                rows.append(
+                    beam_row_missing(
+                        beam, tip=tip, max_age_sec=max_age_sec, now=now
+                    )
+                )
             else:
                 rows.append(
                     beam_row_from_record(
@@ -297,7 +364,11 @@ def collect_beam_rows(
         except Exception:
             record = None
         if record is None:
-            rows.append(beam_row_missing(beam))
+            rows.append(
+                beam_row_missing(
+                    beam, tip=tip, max_age_sec=max_age_sec, now=now
+                )
+            )
         else:
             rows.append(
                 beam_row_from_record(
@@ -347,9 +418,10 @@ def build_beam_overlay(
     """
     HoloViews Points (+ labels) for beams with a display az/el.
 
-    Fresh commanded/nominal marks are teal; stale marks are gray. When
-    commanded differs from nominal, a smaller orange nominal mark is optional.
-    Hover fields match tip-tilt arrows: az, el, |shift|′, angle.
+    Applied corrections are teal; not-applied marks are muted teal; stale
+    warp corrections are gray. When commanded differs from nominal, a smaller
+    orange nominal mark is optional. Hover fields match tip-tilt arrows:
+    az, el, |shift|′, angle.
     """
     import holoviews as hv
 
@@ -373,15 +445,16 @@ def build_beam_overlay(
             "angle_deg": angle_deg,
         }
 
-    ok_pts: list[dict] = []
+    applied_pts: list[dict] = []
+    not_applied_pts: list[dict] = []
     stale_pts: list[dict] = []
     nom_pts: list[dict] = []
 
     for row in rows:
         if row.display_az_deg is None or row.display_el_deg is None:
             continue
-        if row.status == "ok":
-            ok_pts.append(
+        if row.status == STATUS_APPLIED:
+            applied_pts.append(
                 _pack(row, f"dr{row.beam}", row.display_az_deg, row.display_el_deg)
             )
             if (
@@ -403,7 +476,11 @@ def build_beam_overlay(
                         row.nominal_el_deg,
                     )
                 )
-        elif row.status == "stale":
+        elif row.status == STATUS_NOT_APPLIED:
+            not_applied_pts.append(
+                _pack(row, f"dr{row.beam}", row.display_az_deg, row.display_el_deg)
+            )
+        elif row.status == STATUS_STALE:
             stale_pts.append(
                 _pack(row, f"dr{row.beam}?", row.display_az_deg, row.display_el_deg)
             )
@@ -458,9 +535,12 @@ def build_beam_overlay(
         )
         return scatter * labels_el
 
-    ok = _points(ok_pts, color="#00a3a3", size=12)
-    if ok is not None:
-        layers.append(ok)
+    applied = _points(applied_pts, color="#00a3a3", size=12)
+    if applied is not None:
+        layers.append(applied)
+    not_applied = _points(not_applied_pts, color="#7fbfbf", size=11)
+    if not_applied is not None:
+        layers.append(not_applied)
     stale = _points(stale_pts, color="#888888", size=10)
     if stale is not None:
         layers.append(stale)
