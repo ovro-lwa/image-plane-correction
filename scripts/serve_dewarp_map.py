@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the live tip-tilt / dewarp vector-field Panel app.
+"""Serve the live-dewarp / beamformer tip-tilt vector-field Panel app.
 
 Requires optional viz extras::
 
@@ -16,7 +16,8 @@ Or run this script directly (starts ``pn.serve``)::
         --warp-path /fast/claw/warps/warp_55MHz.npz \\
         --frequency-mhz 55 --poll-seconds 3 --show
 
-If ``--warp-path`` is omitted, the app resolves the path from
+Tip-tilt maps are per subband; pass ``--frequency-mhz`` for the subband to
+view. If ``--warp-path`` is omitted, the app resolves the path from
 ``mnc.tiptilt.get_tiptilt_path(frequency_mhz)`` when etcd/mnc are available.
 """
 
@@ -33,7 +34,9 @@ if str(_SRC) not in sys.path:
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Serve live dewarp tip-tilt map")
+    parser = argparse.ArgumentParser(
+        description="Serve live dewarp / beamformer tip-tilt correction map"
+    )
     parser.add_argument(
         "--warp-path",
         type=Path,
@@ -44,7 +47,7 @@ def _parse_args(argv=None):
         "--frequency-mhz",
         type=int,
         default=55,
-        help="App frequency in MHz (default: 55)",
+        help="Beamformer subband frequency in MHz (default: 55)",
     )
     parser.add_argument(
         "--poll-seconds",
@@ -129,7 +132,9 @@ _args = _parse_args()
 # ``panel serve`` imports this module per browser session — servable app attaches
 # its periodic callback via ``pn.state.onload``.
 if __name__ != "__main__":
-    _build_app(_args).servable(title=f"Dewarp map {_args.frequency_mhz} MHz")
+    _build_app(_args).servable(
+        title=f"Live dewarp · subband {_args.frequency_mhz} MHz"
+    )
 
 if __name__ == "__main__":
     import threading
@@ -139,9 +144,9 @@ if __name__ == "__main__":
 
     url = f"http://{_args.address}:{_args.port}/"
     print(
-        f"Serving dewarp map at {url} "
-        f"(warp={_args.warp_path or 'etcd'}, freq={_args.frequency_mhz} MHz, "
-        f"poll={_args.poll_seconds}s)",
+        f"Serving live dewarp at {url} "
+        f"(warp={_args.warp_path or 'etcd'}, "
+        f"subband={_args.frequency_mhz} MHz, poll={_args.poll_seconds}s)",
         file=sys.stderr,
     )
     # Always show=False. Panel's show=True calls server.show('/') and opens a
@@ -166,6 +171,6 @@ if __name__ == "__main__":
         port=int(_args.port),
         address=_args.address,
         show=False,
-        title=f"Dewarp map {_args.frequency_mhz} MHz",
+        title=f"Live dewarp · subband {_args.frequency_mhz} MHz",
         websocket_origin=[f"{_args.address}:{_args.port}", f"localhost:{_args.port}"],
     )

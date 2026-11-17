@@ -20,9 +20,12 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from image_plane_correction.tiptilt_map import (  # noqa: E402
+    DEFAULT_SUBBAND_FREQUENCIES_MHZ,
     frequency_mhz_from_filename,
     obstime_unix_from_header,
     pixel_flow_to_tiptilt_arrays,
+    resolve_publish_frequencies_mhz,
+    subband_frequencies_mhz,
     write_tiptilt_npz,
 )
 
@@ -53,6 +56,38 @@ class TestTiptiltMap(unittest.TestCase):
         self.assertEqual(frequency_mhz_from_filename("/tmp/flow_82MHz_map.npz"), 82)
         with self.assertRaises(ValueError):
             frequency_mhz_from_filename("warp.npz")
+
+    def test_resolve_publish_frequencies_single_and_all(self):
+        self.assertEqual(
+            resolve_publish_frequencies_mhz(warp_path="warp_55MHz.npz"),
+            (55,),
+        )
+        self.assertEqual(
+            resolve_publish_frequencies_mhz(
+                warp_path="warp_55MHz.npz", frequency_mhz=82
+            ),
+            (82,),
+        )
+        all_freqs = resolve_publish_frequencies_mhz(
+            warp_path="warp_55MHz.npz",
+            frequency_mhz=82,
+            publish_all_frequencies=True,
+        )
+        self.assertEqual(all_freqs, subband_frequencies_mhz())
+        self.assertIn(55, all_freqs)
+        self.assertIn(82, all_freqs)
+        self.assertEqual(
+            resolve_publish_frequencies_mhz(
+                warp_path="warp_55MHz.npz",
+                publish_all_frequencies=True,
+                frequencies_mhz=(40, 73),
+            ),
+            (40, 73),
+        )
+        self.assertEqual(
+            DEFAULT_SUBBAND_FREQUENCIES_MHZ[:3],
+            (13, 18, 23),
+        )
 
     def test_obstime_from_header(self):
         h = fits.Header()

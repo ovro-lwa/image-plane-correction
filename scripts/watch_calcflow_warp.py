@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Watch a directory for ``*.fits.fz`` files, pick the latest by the
-``YYYYMMDD_HHMMSS`` token in the filename, funpack it into ``--output-dir``,
-run ``calcflow``, and write a tip-tilt named-array warp ``.npz`` as
-``--warp-filename`` in that same directory. Optionally publish the absolute
-path to etcd via :func:`mnc.tiptilt.set_tiptilt`.
+Watch a directory of UT day subdirs (``YYYY-MM-DD``) for ``*.fits.fz`` files,
+use only the latest day, pick the newest file by the ``YYYYMMDD_HHMMSS`` token
+in the filename, funpack it into ``--output-dir``, run ``calcflow``, and write
+a tip-tilt named-array warp ``.npz`` as ``--warp-filename`` in that same
+directory. Optionally publish the absolute path to etcd via
+:func:`mnc.tiptilt.set_tiptilt`.
+
+When a newer ``YYYY-MM-DD`` subdirectory appears under ``--watch-dir``, the
+watcher switches to that day automatically.
 
 Designed as a long-running process for user ``claw`` (e.g. systemd --user).
 
@@ -27,8 +31,9 @@ import re
 import subprocess
 import sys
 import time
+from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -41,9 +46,9 @@ if str(_SRC) not in sys.path:
 from image_plane_correction.flow import calcflow  # noqa: E402
 from image_plane_correction.reference_cache import ReferenceSkyCache  # noqa: E402
 from image_plane_correction.tiptilt_map import (  # noqa: E402
-    frequency_mhz_from_filename,
     obstime_unix_from_header,
     pixel_flow_to_tiptilt_npz,
+    resolve_publish_frequencies_mhz,
 )
 
 LOG = logging.getLogger("watch_calcflow_warp")
@@ -117,15 +122,25 @@ def _write_warp_npz(
     LOG.info("Wrote tip-tilt warp %s", warp_output)
 
 
-def _publish_tiptilt(warp_output: Path, *, ttl_sec: float, frequency_mhz: int) -> None:
+def _publish_tiptilt(
+    warp_output: Path,
+    *,
+    ttl_sec: float,
+    frequencies_mhz: Sequence[int],
+) -> None:
     """
     Publish ``warp_output`` absolute path to etcd for ``mnc.tiptilt`` consumers.
 
+    ``frequencies_mhz`` may be one subband or many (same map under each key).
     Import/etcd failures are logged and swallowed so local testing can still write
     the NPZ when ``mnc``/``lwa_f`` or etcd are unavailable. Use
     ``--no-publish-tiptilt`` to skip this path entirely.
     """
     abs_path = str(warp_output.resolve())
+    freqs = tuple(int(f) for f in frequencies_mhz)
+    if not freqs:
+        LOG.warning("Tip-tilt publish skipped (empty frequency list) for %s", abs_path)
+        return
     try:
         from mnc.tiptilt import set_tiptilt
     except ImportError as exc:
@@ -136,21 +151,34 @@ def _publish_tiptilt(warp_output: Path, *, ttl_sec: float, frequency_mhz: int) -
             abs_path,
         )
         return
-    try:
-        set_tiptilt(abs_path, ttl_sec, frequency_mhz=frequency_mhz)
-    except Exception:
-        LOG.exception(
-            "Tip-tilt publish failed for %s (frequency_mhz=%d); NPZ is on disk",
-            abs_path,
-            frequency_mhz,
-        )
+    ok: list[int] = []
+    for frequency_mhz in freqs:
+        try:
+            set_tiptilt(abs_path, ttl_sec, frequency_mhz=frequency_mhz)
+        except Exception:
+            LOG.exception(
+                "Tip-tilt publish failed for %s (frequency_mhz=%d); NPZ is on disk",
+                abs_path,
+                frequency_mhz,
+            )
+            continue
+        ok.append(frequency_mhz)
+    if not ok:
         return
-    LOG.info(
-        "Published tip-tilt etcd entry frequency_mhz=%d path=%s ttl_sec=%s",
-        frequency_mhz,
-        abs_path,
-        ttl_sec,
-    )
+    if len(ok) == 1:
+        LOG.info(
+            "Published tip-tilt etcd entry frequency_mhz=%d path=%s ttl_sec=%s",
+            ok[0],
+            abs_path,
+            ttl_sec,
+        )
+    else:
+        LOG.info(
+            "Published tip-tilt etcd entries frequencies_mhz=%s path=%s ttl_sec=%s",
+            ok,
+            abs_path,
+            ttl_sec,
+        )
 
 
 def _unpacked_fits_name(fz_path: Path) -> str:
@@ -183,6 +211,7 @@ def process_fz(
     publish_tiptilt: bool = True,
     ttl_sec: float = 600.0,
     frequency_mhz: Optional[int] = None,
+    publish_all_frequencies: bool = False,
     az_step_deg: float = 5.0,
     el_step_deg: float = 2.5,
     el_min_deg: float = 0.0,
@@ -260,12 +289,12 @@ def process_fz(
     )
 
     if publish_tiptilt:
-        freq = (
-            frequency_mhz
-            if frequency_mhz is not None
-            else frequency_mhz_from_filename(warp_output)
+        freqs = resolve_publish_frequencies_mhz(
+            warp_path=warp_output,
+            frequency_mhz=frequency_mhz,
+            publish_all_frequencies=publish_all_frequencies,
         )
-        _publish_tiptilt(warp_output, ttl_sec=ttl_sec, frequency_mhz=freq)
+        _publish_tiptilt(warp_output, ttl_sec=ttl_sec, frequencies_mhz=freqs)
 
     if not keep_fits:
         try:
@@ -273,6 +302,50 @@ def process_fz(
             LOG.info("Removed unpacked FITS %s", fits_path)
         except OSError as exc:
             LOG.warning("Could not remove %s: %s", fits_path, exc)
+
+
+_DAY_DIR_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def _parse_day_dirname(name: str) -> Optional[date]:
+    """
+    Return a :class:`~datetime.date` if ``name`` is a valid UT day dir
+    (``YYYY-MM-DD``), else None.
+    """
+    m = _DAY_DIR_RE.fullmatch(name)
+    if m is None:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _latest_day_dir(watch_dir: Path) -> Optional[Path]:
+    """
+    Return the newest ``YYYY-MM-DD`` subdirectory under ``watch_dir``, or None.
+
+    Only direct child directories whose names parse as calendar dates are
+    considered (UT day folders from the pipeline). Lexicographic order of
+    valid ISO dates matches chronological order.
+    """
+    latest: Optional[Path] = None
+    latest_day: Optional[date] = None
+    try:
+        children = watch_dir.iterdir()
+    except OSError as exc:
+        LOG.warning("Could not list --watch-dir %s: %s", watch_dir, exc)
+        return None
+    for child in children:
+        if not child.is_dir():
+            continue
+        day = _parse_day_dirname(child.name)
+        if day is None:
+            continue
+        if latest_day is None or day > latest_day:
+            latest_day = day
+            latest = child
+    return latest
 
 
 def _name_sort_key(path: Path) -> str:
@@ -288,9 +361,9 @@ def _name_sort_key(path: Path) -> str:
     return m.group(1) if m else path.name
 
 
-def _latest_fz(watch_dir: Path) -> Optional[Path]:
-    """Return the newest ``*.fits.fz`` by filename timestamp, or None."""
-    files = list(watch_dir.glob("*.fits.fz"))
+def _latest_fz(day_dir: Path) -> Optional[Path]:
+    """Return the newest ``*.fits.fz`` in ``day_dir`` by filename timestamp."""
+    files = list(day_dir.glob("*.fits.fz"))
     if not files:
         return None
     return max(files, key=_name_sort_key)
@@ -311,17 +384,37 @@ def run_loop(args: argparse.Namespace) -> None:
     if not watch_dir.is_dir():
         raise SystemExit(f"--watch-dir is not a directory: {watch_dir}")
 
-    last_processed_name: Optional[str] = None
+    # Track last processed file as (day_dirname, filename) so a same-named
+    # file on a new UT day is not skipped, and a new day can be adopted.
+    last_processed: Optional[tuple[str, str]] = None
+    active_day_dir: Optional[Path] = None
     reference_cache: Optional[ReferenceSkyCache] = (
         None if args.no_cache_reference_sky else ReferenceSkyCache()
     )
 
+    def resolve_day_dir() -> Optional[Path]:
+        nonlocal active_day_dir
+        day_dir = _latest_day_dir(watch_dir)
+        if day_dir is None:
+            if active_day_dir is not None:
+                LOG.warning("No YYYY-MM-DD day subdirectory under %s", watch_dir)
+                active_day_dir = None
+            return None
+        if active_day_dir is None or day_dir.resolve() != active_day_dir.resolve():
+            LOG.info("Using latest UT day directory: %s", day_dir)
+            active_day_dir = day_dir
+        return day_dir
+
     def maybe_process_latest() -> None:
-        nonlocal last_processed_name
-        fz = _latest_fz(watch_dir)
+        nonlocal last_processed
+        day_dir = resolve_day_dir()
+        if day_dir is None:
+            return
+        fz = _latest_fz(day_dir)
         if fz is None:
             return
-        if fz.name == last_processed_name:
+        key = (day_dir.name, fz.name)
+        if key == last_processed:
             return
         if not _wait_until_stable(
             fz,
@@ -330,12 +423,18 @@ def run_loop(args: argparse.Namespace) -> None:
             timeout_s=args.stable_timeout,
         ):
             return
-        # After settle, re-resolve latest in case a newer file arrived.
-        fz = _latest_fz(watch_dir)
-        if fz is None or fz.name == last_processed_name:
+        # After settle, re-resolve day + latest in case a newer day or file arrived.
+        day_dir = resolve_day_dir()
+        if day_dir is None:
+            return
+        fz = _latest_fz(day_dir)
+        if fz is None:
+            return
+        key = (day_dir.name, fz.name)
+        if key == last_processed:
             return
         try:
-            LOG.info("Selected latest by name: %s", fz.name)
+            LOG.info("Selected latest by name: %s/%s", day_dir.name, fz.name)
             process_fz(
                 fz,
                 output_dir=output_dir,
@@ -356,20 +455,21 @@ def run_loop(args: argparse.Namespace) -> None:
                 publish_tiptilt=args.publish_tiptilt,
                 ttl_sec=args.ttl_sec,
                 frequency_mhz=args.frequency_mhz,
+                publish_all_frequencies=args.publish_all_frequencies,
                 az_step_deg=args.az_step_deg,
                 el_step_deg=args.el_step_deg,
                 el_min_deg=args.el_min_deg,
             )
-            last_processed_name = fz.name
+            last_processed = key
         except Exception:
             LOG.exception("Failed processing %s", fz)
-            # Leave last_processed_name unchanged so the next poll can retry.
+            # Leave last_processed unchanged so the next poll can retry.
 
     if args.process_existing:
         maybe_process_latest()
 
     LOG.info(
-        "Watching %s for latest *.fits.fz (by name timestamp) every %.1fs; "
+        "Watching %s for latest YYYY-MM-DD/*.fits.fz (by name timestamp) every %.1fs; "
         "output-dir=%s warp=%s",
         watch_dir,
         args.poll_seconds,
@@ -384,14 +484,18 @@ def run_loop(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "Watch for *.fits.fz, funpack, calcflow, write tip-tilt warp NPZ, "
-            "optionally publish via mnc.tiptilt.set_tiptilt."
+            "Watch the latest YYYY-MM-DD day under --watch-dir for *.fits.fz, "
+            "funpack, calcflow, write tip-tilt warp NPZ, optionally publish via "
+            "mnc.tiptilt.set_tiptilt."
         )
     )
     p.add_argument(
         "--watch-dir",
         required=True,
-        help="Directory to poll for new *.fits.fz files",
+        help=(
+            "Parent directory whose YYYY-MM-DD (UT) subdirectories contain "
+            "*.fits.fz; only the latest day is polled"
+        ),
     )
     p.add_argument(
         "--output-dir",
@@ -505,6 +609,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Subband MHz for etcd publish (default: parse _<N>MHz from --warp-filename)",
+    )
+    p.add_argument(
+        "--publish-all-frequencies",
+        action="store_true",
+        help=(
+            "Publish the same NPZ path under every OVRO-LWA subband MHz key "
+            "(BeamTracker tip-tilt catalog); overrides --frequency-mhz"
+        ),
     )
     p.add_argument(
         "--az-step-deg",

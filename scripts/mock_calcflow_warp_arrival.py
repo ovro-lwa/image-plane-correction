@@ -108,6 +108,7 @@ def run(args: argparse.Namespace) -> None:
                 publish_tiptilt=args.publish_tiptilt,
                 ttl_sec=args.ttl_sec,
                 frequency_mhz=args.frequency_mhz,
+                publish_all_frequencies=args.publish_all_frequencies,
                 az_step_deg=args.az_step_deg,
                 el_step_deg=args.el_step_deg,
                 el_min_deg=args.el_min_deg,
@@ -236,6 +237,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Subband MHz for etcd publish (default: parse _<N>MHz from --warp-filename)",
+    )
+    p.add_argument(
+        "--publish-all-frequencies",
+        action="store_true",
+        help=(
+            "Publish the same NPZ path under every OVRO-LWA subband MHz key "
+            "(overrides --frequency-mhz)"
+        ),
     )
     p.add_argument(
         "--az-step-deg",

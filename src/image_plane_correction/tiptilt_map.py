@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
@@ -36,6 +36,26 @@ _FREQUENCY_IN_NAME = re.compile(r"_(\d+)MHz", re.IGNORECASE)
 
 # OVRO-LWA geodetic fallback if ``lwa_antpos`` is unavailable (matches mnc tests).
 _OVRO_FALLBACK = dict(lat=37.23335, lon=-118.28167, height=1222.0)
+
+# Power-beam subband names (MHz). Matches ``mnc.xengine_beamformer_control``.
+DEFAULT_SUBBAND_FREQUENCIES_MHZ: Tuple[int, ...] = (
+    13,
+    18,
+    23,
+    27,
+    32,
+    36,
+    41,
+    46,
+    50,
+    55,
+    59,
+    64,
+    69,
+    73,
+    78,
+    82,
+)
 
 
 def default_location() -> EarthLocation:
@@ -67,6 +87,52 @@ def frequency_mhz_from_filename(path: PathLike) -> int:
     if frequency_mhz <= 0:
         raise ValueError("frequency_mhz must be a positive integer")
     return frequency_mhz
+
+
+def subband_frequencies_mhz() -> Tuple[int, ...]:
+    """
+    Return OVRO-LWA tip-tilt / beamformer subband names in MHz.
+
+    Prefers ``mnc.xengine_beamformer_control.SUBBAND_FREQUENCIES_MHZ`` when
+    importable so publish stays aligned with live BeamTracker; otherwise uses
+    :data:`DEFAULT_SUBBAND_FREQUENCIES_MHZ`.
+    """
+    try:
+        from mnc.xengine_beamformer_control import SUBBAND_FREQUENCIES_MHZ
+    except ImportError:
+        return DEFAULT_SUBBAND_FREQUENCIES_MHZ
+    return tuple(int(x) for x in SUBBAND_FREQUENCIES_MHZ)
+
+
+def resolve_publish_frequencies_mhz(
+    *,
+    warp_path: PathLike,
+    frequency_mhz: Optional[int] = None,
+    publish_all_frequencies: bool = False,
+    frequencies_mhz: Optional[Sequence[int]] = None,
+) -> Tuple[int, ...]:
+    """
+    Choose which tip-tilt catalog keys should point at ``warp_path``.
+
+    Precedence: explicit ``frequencies_mhz`` → all subbands when
+    ``publish_all_frequencies`` → single ``frequency_mhz`` → parse from
+    ``warp_path`` basename.
+    """
+    if frequencies_mhz is not None:
+        freqs = tuple(int(x) for x in frequencies_mhz)
+        if not freqs:
+            raise ValueError("frequencies_mhz must be non-empty")
+        if any(f <= 0 for f in freqs):
+            raise ValueError("frequencies_mhz values must be positive ints")
+        return freqs
+    if publish_all_frequencies:
+        return subband_frequencies_mhz()
+    if frequency_mhz is not None:
+        freq = int(frequency_mhz)
+        if freq <= 0:
+            raise ValueError("frequency_mhz must be a positive int")
+        return (freq,)
+    return (frequency_mhz_from_filename(warp_path),)
 
 
 def obstime_unix_from_header(header) -> float:

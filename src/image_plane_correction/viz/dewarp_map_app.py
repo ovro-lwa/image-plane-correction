@@ -1,7 +1,7 @@
-"""Panel + HoloViews live tip-tilt / dewarp vector-field app.
+"""Panel + HoloViews live-dewarp / beamformer tip-tilt vector-field app.
 
 Celestial Mollweide quiver (RA increasing left) from a tip-tilt named-array
-``.npz``, with optional active-beam pointing overlays.
+``.npz`` for a beamformer subband, with optional active-beam pointing overlays.
 """
 
 from __future__ import annotations
@@ -692,10 +692,15 @@ def _beam_table_html(rows: List[BeamMapRow]) -> str:
 
 
 class DewarpMapApp(param.Parameterized):
-    """Param-driven live tip-tilt map view for one frequency / warp path."""
+    """Param-driven live-dewarp view of beamformer tip-tilt for one subband."""
 
     warp_path = param.String(default="", doc="Path to tip-tilt .npz (empty → etcd resolve)")
-    frequency_mhz = param.Integer(default=55, bounds=(1, 300), doc="App frequency MHz")
+    frequency_mhz = param.Integer(
+        default=55,
+        bounds=(1, 300),
+        label="Subband MHz",
+        doc="Beamformer subband frequency (MHz); tip-tilt maps exist per subband",
+    )
     poll_seconds = param.Number(default=3.0, bounds=(0.5, 60.0))
     stride = param.Integer(
         default=3,
@@ -786,7 +791,9 @@ class DewarpMapApp(param.Parameterized):
     def _set_header(self, path: Optional[Path], mtime: float, obstime: float) -> None:
         name = path.name if path is not None else "?"
         self.header = (
-            f"### Tip-tilt **{self.frequency_mhz} MHz** — `{name}`\n\n"
+            f"### Live dewarp — `{name}`\n\n"
+            f"Beamformer tip-tilt correction for a subband "
+            f"(**{self.frequency_mhz} MHz**).\n\n"
             f"- **map obstime:** {_format_unix(obstime)}\n"
             f"- **file mtime:** {_format_unix(mtime)}\n"
             f"- **revision:** {self.revision}\n"
@@ -807,7 +814,7 @@ class DewarpMapApp(param.Parameterized):
         if path is None:
             self.status = (
                 f"No warp path: set --warp-path or publish tip-tilt for "
-                f"{self.frequency_mhz} MHz"
+                f"subband {self.frequency_mhz} MHz"
             )
             return False
         if not path.is_file():
@@ -908,7 +915,8 @@ class DewarpMapApp(param.Parameterized):
         )
         cra = self._resolved_central_ra()
         title = (
-            f"Tip-tilt {self.frequency_mhz} MHz | "
+            f"Live dewarp · beamformer tip-tilt "
+            f"(subband {self.frequency_mhz} MHz) | "
             f"obstime {_format_unix(obstime)} | "
             f"mtime {_format_unix(mtime)} | "
             f"Mollweide RA/Dec (RA←, center RA={cra:.1f}°)"
@@ -985,7 +993,12 @@ class DewarpMapApp(param.Parameterized):
     @param.depends("beam_table_html")
     def beam_table_view(self):
         html = self.beam_table_html or "<em>No active beams</em>"
-        return f"### Beams\n\n{html}"
+        return (
+            f"### Beamformer pointings\n\n"
+            f"Tip-tilt correction sampled at each active beam "
+            f"(subband **{self.frequency_mhz} MHz**).\n\n"
+            f"{html}"
+        )
 
     def _start_periodic_callback(self) -> None:
         """Schedule exactly one poll callback for this session via ``onload``.
@@ -1012,7 +1025,7 @@ class DewarpMapApp(param.Parameterized):
                 LOG.warning("Poll callback not started: %s", exc)
                 return
             LOG.info(
-                "Started dewarp-map poll every %s ms (freq=%s)",
+                "Started live-dewarp poll every %s ms (subband=%s MHz)",
                 period_ms,
                 self.frequency_mhz,
             )
@@ -1044,14 +1057,14 @@ class DewarpMapApp(param.Parameterized):
                     value=120.0,
                 ),
             },
-            name="Dewarp map",
+            name="Live dewarp",
             width=280,
             sizing_mode="fixed",
         )
         demo_note = (
-            " (demo pointings)"
+            "demo beamformer pointings"
             if self._demo_pointings is not None
-            else " (live etcd pointings)"
+            else "live beamformer pointings (etcd)"
         )
         self._ensure_dynamic_plot()
         self._plot_pane = pn.pane.HoloViews(
@@ -1073,9 +1086,10 @@ class DewarpMapApp(param.Parameterized):
         )
         self._layout = pn.Column(
             pn.pane.Markdown(
-                f"# Live dewarp / tip-tilt map\n"
-                f"Frequency **{self.frequency_mhz} MHz** — "
-                f"path `{self.warp_path or '(from etcd)'}`{demo_note}\n\n"
+                f"# Live dewarp\n\n"
+                f"**Beamformer tip-tilt correction** for a subband "
+                f"(**{self.frequency_mhz} MHz**). "
+                f"Map path `{self.warp_path or '(from etcd)'}` — {demo_note}.\n\n"
                 f"Celestial **Mollweide** centred on **RA=0** (RA increases left). "
                 f"Samples use an **equal-area** RA/Dec lattice (uniform on Mollweide). "
                 f"Arrow **length** encodes |shift| in **arcmin**; "
@@ -1091,7 +1105,7 @@ class DewarpMapApp(param.Parameterized):
         self._start_periodic_callback()
         return self._layout
 
-    def servable(self, title: str = "Dewarp map"):
+    def servable(self, title: str = "Live dewarp"):
         """Mark the layout servable for ``panel serve``."""
         return self.panel().servable(title=title)
 
@@ -1108,7 +1122,7 @@ def create_app(
     show_nominal_marks: bool = True,
     demo_pointings_path: Optional[PathLike] = None,
 ) -> DewarpMapApp:
-    """Factory used by the serve script."""
+    """Factory used by the serve script (one live-dewarp view per subband)."""
     demo = None
     if demo_pointings_path is not None:
         demo = load_demo_pointings(demo_pointings_path)

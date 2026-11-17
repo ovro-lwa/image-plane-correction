@@ -10,6 +10,9 @@
 #
 # Linger (optional, survive logout):
 #   loginctl enable-linger claw
+#
+# Optional: add --publish-all-frequencies to register the same NPZ under every
+# OVRO-LWA subband MHz tip-tilt catalog key.
 
 [Unit]
 Description=Watch *.fits.fz and write tip-tilt warp NPZ
