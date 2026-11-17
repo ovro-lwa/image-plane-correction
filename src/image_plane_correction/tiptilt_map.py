@@ -78,6 +78,9 @@ def default_location() -> EarthLocation:
 #: Default directory for per-subband tip-tilt warp NPZ files.
 DEFAULT_WARP_DIR = Path("/fast/claw/warps")
 
+#: Max concurrent beamformer subbands the live-dewarp UI expects (OVRO-LWA).
+MAX_WARP_SUBBANDS = 16
+
 
 def frequency_mhz_from_filename(path: PathLike) -> int:
     """Return the positive integer between ``_`` and ``MHz`` in the basename."""
@@ -107,6 +110,33 @@ def warp_path_for_subband(
 ) -> Path:
     """Return ``warp_dir / warp_<N>MHz.npz`` for beamformer subband ``N``."""
     return Path(warp_dir).expanduser() / warp_npz_basename(frequency_mhz)
+
+
+def discover_warp_subbands_mhz(
+    warp_dir: PathLike,
+    *,
+    max_subbands: int = MAX_WARP_SUBBANDS,
+) -> Tuple[int, ...]:
+    """
+    Discover subband MHz values from ``warp_<N>MHz.npz`` files in ``warp_dir``.
+
+    Returns a sorted tuple of at most ``max_subbands`` frequencies (default 16).
+    Missing / unreadable directories yield an empty tuple.
+    """
+    if type(max_subbands) is not int or max_subbands < 1:
+        raise ValueError("max_subbands must be an int >= 1")
+    root = Path(warp_dir).expanduser()
+    if not root.is_dir():
+        return ()
+    freqs: set[int] = set()
+    for path in root.glob("warp_*MHz.npz"):
+        if not path.is_file():
+            continue
+        try:
+            freqs.add(frequency_mhz_from_filename(path))
+        except ValueError:
+            continue
+    return tuple(sorted(freqs)[: int(max_subbands)])
 
 
 def subband_frequencies_mhz() -> Tuple[int, ...]:

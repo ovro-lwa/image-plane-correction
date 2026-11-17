@@ -1,8 +1,8 @@
 # systemd --user unit for serve_dewarp_map.py (operator UI as user claw)
 #
-# Live dewarp / beamformer tip-tilt correction for one subband. Tip-tilt NPZ
-# files live under WarpDir as warp_<N>MHz.npz; set FrequencyMHz to the subband
-# this instance should show (duplicate the unit + Port for another subband).
+# Live dewarp / beamformer tip-tilt correction. Discovers up to 16
+# warp_<N>MHz.npz maps under WarpDir; the Panel UI selects which subband to
+# display (no FrequencyMHz in the unit — one service covers all subbands).
 #
 # Prerequisites:
 #   pip install -e '.[viz]'   # panel, holoviews, bokeh, param in the ExecStart Python
@@ -11,7 +11,7 @@
 # Install:
 #   mkdir -p ~/.config/systemd/user
 #   cp scripts/serve_dewarp_map.service ~/.config/systemd/user/
-#   # edit WarpDir / FrequencyMHz / Port below, then:
+#   # edit WarpDir / Port below if needed, then:
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now serve_dewarp_map.service
 #   journalctl --user -u serve_dewarp_map -f
@@ -35,14 +35,12 @@ Type=simple
 WorkingDirectory=/home/claw/code/image-plane-correction
 Environment=PYTHONPATH=/home/claw/code/image-plane-correction/src
 Environment=PATH=/opt/devel/claw/envs/py312/bin:/usr/bin
-# WarpDir holds per-subband maps: warp_<FrequencyMHz>MHz.npz
+# WarpDir holds per-subband maps: warp_<N>MHz.npz (up to 16; UI selects N)
 Environment=WarpDir=/fast/claw/warps
-Environment=FrequencyMHz=55
 Environment=Port=5007
 ExecStart=/opt/devel/claw/envs/py312/bin/python \
   /home/claw/code/image-plane-correction/scripts/serve_dewarp_map.py \
   --warp-dir ${WarpDir} \
-  --frequency-mhz ${FrequencyMHz} \
   --poll-seconds 3 \
   --port ${Port} \
   --address 127.0.0.1

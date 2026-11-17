@@ -23,7 +23,9 @@ from image_plane_correction.live_map import (
 )
 from image_plane_correction.tiptilt_map import (
     DEFAULT_WARP_DIR,
+    MAX_WARP_SUBBANDS,
     default_location,
+    discover_warp_subbands_mhz,
     frequency_mhz_from_filename,
     warp_path_for_subband,
 )
@@ -697,21 +699,24 @@ def _beam_table_html(rows: List[BeamMapRow]) -> str:
 
 
 class DewarpMapApp(param.Parameterized):
-    """Param-driven live-dewarp view of beamformer tip-tilt for one subband."""
+    """Param-driven live-dewarp view of beamformer tip-tilt (interactive subband)."""
 
     warp_path = param.String(
         default="",
-        doc="Explicit tip-tilt .npz path (overrides warp_dir / etcd)",
+        doc="Explicit tip-tilt .npz path (locks to one subband; overrides warp_dir)",
     )
     warp_dir = param.String(
         default=str(DEFAULT_WARP_DIR),
         doc="Directory of per-subband warp_<N>MHz.npz files (empty → etcd only)",
     )
-    frequency_mhz = param.Integer(
+    frequency_mhz = param.Selector(
         default=55,
-        bounds=(1, 300),
+        objects=[55],
         label="Subband MHz",
-        doc="Beamformer subband frequency (MHz); selects warp_<N>MHz.npz under warp_dir",
+        doc=(
+            "Beamformer subband to display; options come from discovered "
+            f"warp_<N>MHz.npz files under warp_dir (up to {MAX_WARP_SUBBANDS})"
+        ),
     )
     poll_seconds = param.Number(default=3.0, bounds=(0.5, 60.0))
     stride = param.Integer(
@@ -739,10 +744,15 @@ class DewarpMapApp(param.Parameterized):
     # Bumped on every successful map / beam reload so reactive panes re-render.
     revision = param.Integer(default=0, doc="Map revision counter")
     beam_table_html = param.String(default="", doc="HTML table of beam warp samples")
+    available_subbands_mhz = param.List(
+        default=[],
+        doc="Discovered subband MHz values available for display",
+    )
 
     def __init__(
         self,
         demo_pointings: Optional[Dict[int, BeamPointingRecord]] = None,
+        preferred_frequency_mhz: Optional[int] = None,
         **params,
     ):
         super().__init__(**params)
@@ -751,6 +761,7 @@ class DewarpMapApp(param.Parameterized):
         self._loaded_mtime: Optional[float] = None
         self._loaded_obstime: Optional[float] = None
         self._demo_pointings = demo_pointings
+        self._preferred_frequency_mhz = preferred_frequency_mhz
         self._beam_rows: List[BeamMapRow] = []
         self._beam_fp: tuple = ()
         self._plot_obj = None
@@ -762,7 +773,9 @@ class DewarpMapApp(param.Parameterized):
         self._pn = None
         self._hv = None
         self._layout = None
+        self._subband_locked = bool((self.warp_path or "").strip())
         self._ensure_extensions()
+        self.refresh_available_subbands(force=True)
         self.reload(force=True)
         self.refresh_beams(force=True)
         self._compose_plot()
@@ -783,9 +796,65 @@ class DewarpMapApp(param.Parameterized):
             frequency_mhz=int(self.frequency_mhz),
         )
 
+    def _set_frequency_objects(self, freqs: List[int], *, preferred: Optional[int]) -> None:
+        """Update the subband selector; keep or pick a valid current value."""
+        if not freqs:
+            # Keep a placeholder so Param/Selector stays valid while waiting.
+            placeholder = int(preferred or self.frequency_mhz or 55)
+            freqs = [placeholder]
+            self.available_subbands_mhz = []
+        else:
+            self.available_subbands_mhz = list(freqs)
+        self.param.frequency_mhz.objects = list(freqs)
+        if preferred is not None and preferred in freqs:
+            self.frequency_mhz = int(preferred)
+        elif int(self.frequency_mhz) not in freqs:
+            self.frequency_mhz = int(freqs[0])
+
+    def refresh_available_subbands(self, *, force: bool = False) -> bool:
+        """
+        Discover ``warp_<N>MHz.npz`` subbands under ``warp_dir`` (≤16).
+
+        Returns True when the selectable set (or locked single path) changed.
+        """
+        raw_path = (self.warp_path or "").strip()
+        if raw_path:
+            try:
+                freq = frequency_mhz_from_filename(raw_path)
+            except ValueError:
+                freq = int(self.frequency_mhz)
+            before = tuple(self.available_subbands_mhz)
+            self._set_frequency_objects([freq], preferred=freq)
+            self._subband_locked = True
+            return force or before != (freq,)
+
+        self._subband_locked = False
+        warp_dir = (self.warp_dir or "").strip()
+        if not warp_dir:
+            before = tuple(self.available_subbands_mhz)
+            # Etcd-only: offer the full OVRO catalog (capped) as selectable keys.
+            from image_plane_correction.tiptilt_map import subband_frequencies_mhz
+
+            catalog = list(subband_frequencies_mhz()[:MAX_WARP_SUBBANDS])
+            preferred = self._preferred_frequency_mhz
+            self._set_frequency_objects(catalog, preferred=preferred)
+            return force or before != tuple(self.available_subbands_mhz)
+
+        found = list(
+            discover_warp_subbands_mhz(warp_dir, max_subbands=MAX_WARP_SUBBANDS)
+        )
+        before = tuple(self.available_subbands_mhz)
+        if found == list(before) and not force:
+            return False
+        preferred = self._preferred_frequency_mhz
+        if preferred is None and int(self.frequency_mhz) in found:
+            preferred = int(self.frequency_mhz)
+        self._set_frequency_objects(found, preferred=preferred)
+        return before != tuple(self.available_subbands_mhz)
+
     def resolve_path(self) -> Optional[Path]:
         """
-        Return the tip-tilt NPZ for this subband.
+        Return the tip-tilt NPZ for the selected subband.
 
         Precedence: explicit ``warp_path`` → ``warp_dir/warp_<N>MHz.npz`` →
         tip-tilt etcd for ``frequency_mhz``.
@@ -910,11 +979,12 @@ class DewarpMapApp(param.Parameterized):
         return True
 
     def poll(self) -> None:
-        """Periodic callback: refresh map + beams; always tick status."""
+        """Periodic callback: rediscover subbands, refresh map + beams."""
         try:
+            bands_changed = self.refresh_available_subbands(force=False)
             map_changed = self.reload(force=False)
             beams_changed = self.refresh_beams(force=False)
-            if map_changed or beams_changed:
+            if bands_changed or map_changed or beams_changed:
                 self._compose_plot()
             path = self._loaded_path
             name = path.name if path is not None else "?"
@@ -922,8 +992,10 @@ class DewarpMapApp(param.Parameterized):
             n_stale = sum(1 for r in self._beam_rows if r.status == "stale")
             n_miss = sum(1 for r in self._beam_rows if r.status == "no_pointing")
             mode = "demo" if self._demo_pointings is not None else "etcd"
+            n_bands = len(self.available_subbands_mhz)
             self.status = (
-                f"Watching {name}  beams[{mode}]="
+                f"Watching {name}  subband={self.frequency_mhz} MHz  "
+                f"available={n_bands}/{MAX_WARP_SUBBANDS}  beams[{mode}]="
                 f"{n_ok} ok/{n_stale} stale/{n_miss} missing  "
                 f"obstime={_format_unix(self._loaded_obstime or float('nan'))}  "
                 f"poll@{_format_unix(time.time())}"
@@ -1009,6 +1081,16 @@ class DewarpMapApp(param.Parameterized):
             f"max_age={age_txt}"
         )
 
+    @param.depends("frequency_mhz", watch=True)
+    def _on_frequency_mhz(self) -> None:
+        """Reload tip-tilt map + beams when the operator selects another subband."""
+        self.reload(force=True)
+        self.refresh_beams(force=True)
+        self._compose_plot()
+        self.status = (
+            f"Subband {self.frequency_mhz} MHz → {self._map_source_label()}"
+        )
+
     @param.depends("status")
     def status_view(self):
         return f"**Status:** {self.status}"
@@ -1017,7 +1099,7 @@ class DewarpMapApp(param.Parameterized):
     def header_view(self):
         return self.header or "_No map metadata yet_"
 
-    @param.depends("beam_table_html")
+    @param.depends("beam_table_html", "frequency_mhz")
     def beam_table_view(self):
         html = self.beam_table_html or "<em>No active beams</em>"
         return (
@@ -1025,6 +1107,42 @@ class DewarpMapApp(param.Parameterized):
             f"Tip-tilt correction sampled at each active beam "
             f"(subband **{self.frequency_mhz} MHz**).\n\n"
             f"{html}"
+        )
+
+    @param.depends("frequency_mhz", "available_subbands_mhz", "warp_path", "warp_dir")
+    def intro_view(self):
+        demo_note = (
+            "demo beamformer pointings"
+            if self._demo_pointings is not None
+            else "live beamformer pointings (etcd)"
+        )
+        bands = list(self.available_subbands_mhz)
+        if bands:
+            band_txt = ", ".join(f"{b}" for b in bands)
+            availability = (
+                f"Discovered **{len(bands)}/{MAX_WARP_SUBBANDS}** subbands "
+                f"with maps ({band_txt} MHz). "
+                f"Select **Subband MHz** in the controls to switch."
+            )
+        elif self._subband_locked:
+            availability = "Showing a single explicit warp path."
+        else:
+            availability = (
+                f"Waiting for up to **{MAX_WARP_SUBBANDS}** "
+                f"`warp_<N>MHz.npz` maps under the warp directory."
+            )
+        return (
+            f"# Live dewarp\n\n"
+            f"**Beamformer tip-tilt correction** for a subband "
+            f"(**{self.frequency_mhz} MHz**). "
+            f"Map `{self._map_source_label()}` — {demo_note}.\n\n"
+            f"{availability}\n\n"
+            f"Celestial **Mollweide** centred on **RA=0** (RA increases left). "
+            f"Samples use an **equal-area** RA/Dec lattice (uniform on Mollweide). "
+            f"Arrow **length** encodes |shift| in **arcmin**; "
+            f"**1 BMAJ ≈ {_BMAJ_ARCMIN:g}′** (PSF major-axis FWHM). "
+            f"Arrow length: {_ARROW_REF_ARCMIN:g}′ → {_ARROW_MAX_DISPLAY_DEG:g}° "
+            f"on Mollweide (clip {_ARROW_MAX_ARCMIN:g}′)."
         )
 
     def _start_periodic_callback(self) -> None:
@@ -1052,9 +1170,10 @@ class DewarpMapApp(param.Parameterized):
                 LOG.warning("Poll callback not started: %s", exc)
                 return
             LOG.info(
-                "Started live-dewarp poll every %s ms (subband=%s MHz)",
+                "Started live-dewarp poll every %s ms (warp_dir=%s, subbands≤%s)",
                 period_ms,
-                self.frequency_mhz,
+                self.warp_dir or "(none)",
+                MAX_WARP_SUBBANDS,
             )
 
         pn.state.onload(_start)
@@ -1076,7 +1195,10 @@ class DewarpMapApp(param.Parameterized):
                 "poll_seconds",
             ],
             widgets={
-                "frequency_mhz": {"disabled": True},
+                "frequency_mhz": {
+                    "type": pn.widgets.Select,
+                    "disabled": bool(self._subband_locked),
+                },
                 "poll_seconds": {"disabled": True},
                 "max_pointing_age_sec": pn.widgets.DiscreteSlider(
                     label="Max pointing age sec",
@@ -1087,11 +1209,6 @@ class DewarpMapApp(param.Parameterized):
             name="Live dewarp",
             width=280,
             sizing_mode="fixed",
-        )
-        demo_note = (
-            "demo beamformer pointings"
-            if self._demo_pointings is not None
-            else "live beamformer pointings (etcd)"
         )
         self._ensure_dynamic_plot()
         self._plot_pane = pn.pane.HoloViews(
@@ -1112,18 +1229,7 @@ class DewarpMapApp(param.Parameterized):
             sizing_mode="stretch_width",
         )
         self._layout = pn.Column(
-            pn.pane.Markdown(
-                f"# Live dewarp\n\n"
-                f"**Beamformer tip-tilt correction** for a subband "
-                f"(**{self.frequency_mhz} MHz**). "
-                f"Map `{self._map_source_label()}` — {demo_note}.\n\n"
-                f"Celestial **Mollweide** centred on **RA=0** (RA increases left). "
-                f"Samples use an **equal-area** RA/Dec lattice (uniform on Mollweide). "
-                f"Arrow **length** encodes |shift| in **arcmin**; "
-                f"**1 BMAJ ≈ {_BMAJ_ARCMIN:g}′** (PSF major-axis FWHM). "
-                f"Arrow length: {_ARROW_REF_ARCMIN:g}′ → {_ARROW_MAX_DISPLAY_DEG:g}° "
-                f"on Mollweide (clip {_ARROW_MAX_ARCMIN:g}′)."
-            ),
+            pn.panel(self.intro_view),
             meta_row,
             pn.panel(self.status_view),
             plot_row,
@@ -1165,7 +1271,13 @@ def create_app(
     show_nominal_marks: bool = True,
     demo_pointings_path: Optional[PathLike] = None,
 ) -> DewarpMapApp:
-    """Factory used by the serve script (one live-dewarp view per subband)."""
+    """
+    Factory used by the serve script.
+
+    Discovers up to ``MAX_WARP_SUBBANDS`` maps under ``warp_dir`` and lets the
+    UI select any one. ``frequency_mhz`` is only an optional initial preference
+    (or required when locking to a single ``warp_path`` without ``_<N>MHz``).
+    """
     demo = None
     if demo_pointings_path is not None:
         demo = load_demo_pointings(demo_pointings_path)
@@ -1173,18 +1285,16 @@ def create_app(
     _ = central_az_deg
 
     path_str = "" if warp_path is None else str(Path(warp_path))
-    if frequency_mhz is None:
-        if path_str:
-            frequency_mhz = frequency_mhz_from_filename(path_str)
-        else:
-            raise ValueError(
-                "frequency_mhz is required unless --warp-path contains _<N>MHz"
-            )
+    preferred = int(frequency_mhz) if frequency_mhz is not None else None
+    if path_str and preferred is None:
+        preferred = frequency_mhz_from_filename(path_str)
     dir_str = "" if warp_dir is None else str(Path(warp_dir))
+    # Do not pass frequency_mhz here: Selector objects are empty until
+    # refresh_available_subbands() runs in __init__ and applies preferred.
     return DewarpMapApp(
         warp_path=path_str,
         warp_dir=dir_str,
-        frequency_mhz=int(frequency_mhz),
+        preferred_frequency_mhz=preferred,
         poll_seconds=float(poll_seconds),
         stride=int(stride),
         central_ra_deg=float(central_ra_deg),

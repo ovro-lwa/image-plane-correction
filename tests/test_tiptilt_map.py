@@ -22,6 +22,8 @@ if str(SRC_DIR) not in sys.path:
 from image_plane_correction.tiptilt_map import (  # noqa: E402
     DEFAULT_SUBBAND_FREQUENCIES_MHZ,
     DEFAULT_WARP_DIR,
+    MAX_WARP_SUBBANDS,
+    discover_warp_subbands_mhz,
     frequency_mhz_from_filename,
     obstime_unix_from_header,
     pixel_flow_to_tiptilt_arrays,
@@ -68,8 +70,31 @@ class TestTiptiltMap(unittest.TestCase):
             Path("/fast/claw/warps/warp_41MHz.npz"),
         )
         self.assertEqual(DEFAULT_WARP_DIR, Path("/fast/claw/warps"))
+        self.assertEqual(MAX_WARP_SUBBANDS, 16)
+        self.assertEqual(len(DEFAULT_SUBBAND_FREQUENCIES_MHZ), 16)
         with self.assertRaises(ValueError):
             warp_npz_basename(0)
+
+    def test_discover_warp_subbands_mhz(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(discover_warp_subbands_mhz(root), ())
+            (root / "warp_82MHz.npz").write_bytes(b"x")
+            (root / "warp_41MHz.npz").write_bytes(b"x")
+            (root / "warp_55MHz.npz").write_bytes(b"x")
+            (root / "notes.txt").write_text("ignore")
+            (root / "warp_bad.npz").write_bytes(b"x")
+            self.assertEqual(
+                discover_warp_subbands_mhz(root),
+                (41, 55, 82),
+            )
+            # Cap at max_subbands (sorted ascending).
+            for freq in (13, 18, 23, 27, 32, 36, 46, 50, 59, 64, 69, 73, 78, 90):
+                (root / f"warp_{freq}MHz.npz").write_bytes(b"x")
+            found = discover_warp_subbands_mhz(root, max_subbands=16)
+            self.assertEqual(len(found), 16)
+            self.assertEqual(found[0], 13)
+            self.assertNotIn(90, found)  # beyond the 16-subband cap
 
     def test_resolve_publish_frequencies_single_and_all(self):
         self.assertEqual(

@@ -155,6 +155,7 @@ class TestVectorFieldHelpers(unittest.TestCase):
             self.assertIsNotNone(app._tip)
             self.assertIn("subband", app.header.lower())
             self.assertIn("82", app.header)
+            self.assertEqual(app.available_subbands_mhz, [82])
 
     def test_create_app_parses_subband_from_warp_path(self):
         pytest.importorskip("panel")
@@ -165,6 +166,25 @@ class TestVectorFieldHelpers(unittest.TestCase):
             app = create_app(warp_path=path, warp_dir=None, poll_seconds=60.0, stride=4)
             self.assertEqual(app.frequency_mhz, 41)
             self.assertEqual(app.resolve_path(), path)
+            self.assertTrue(app._subband_locked)
+
+    def test_discovers_and_switches_subbands(self):
+        pytest.importorskip("panel")
+        pytest.importorskip("holoviews")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path_55 = root / "warp_55MHz.npz"
+            path_82 = root / "warp_82MHz.npz"
+            _write_fixture_npz(path_55, scale=1.0)
+            _write_fixture_npz(path_82, scale=2.0)
+            app = create_app(warp_dir=root, poll_seconds=60.0, stride=4)
+            self.assertEqual(app.available_subbands_mhz, [55, 82])
+            self.assertEqual(app.frequency_mhz, 55)
+            self.assertEqual(app.resolve_path(), path_55)
+            app.frequency_mhz = 82
+            self.assertEqual(app.resolve_path(), path_82)
+            self.assertIsNotNone(app._tip)
+            self.assertEqual(app._loaded_path, path_82)
 
     def test_app_reloads_on_mtime(self):
         pytest.importorskip("panel")
