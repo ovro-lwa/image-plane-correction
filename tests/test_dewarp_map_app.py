@@ -30,6 +30,7 @@ from image_plane_correction.viz.dewarp_map_app import (  # noqa: E402
     _display_uv_from_tip_tilt,
     _grid_spacing_deg,
     build_vectorfield,
+    create_app,
     downsample_tiptilt_uv,
     radec_to_mollweide,
     sample_spacing_deg,
@@ -141,6 +142,29 @@ class TestVectorFieldHelpers(unittest.TestCase):
             shift = hover.dimension_values("shift_arcmin")
             self.assertGreater(float(np.nanmax(shift)), 0.0)
             self.assertTrue(any("Labels" in str(k) for k in overlay.keys()))
+
+    def test_resolve_path_from_warp_dir_subband(self):
+        pytest.importorskip("panel")
+        pytest.importorskip("holoviews")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "warp_82MHz.npz"
+            _write_fixture_npz(path)
+            app = create_app(warp_dir=root, frequency_mhz=82, poll_seconds=60.0, stride=4)
+            self.assertEqual(app.resolve_path(), path)
+            self.assertIsNotNone(app._tip)
+            self.assertIn("subband", app.header.lower())
+            self.assertIn("82", app.header)
+
+    def test_create_app_parses_subband_from_warp_path(self):
+        pytest.importorskip("panel")
+        pytest.importorskip("holoviews")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "warp_41MHz.npz"
+            _write_fixture_npz(path)
+            app = create_app(warp_path=path, warp_dir=None, poll_seconds=60.0, stride=4)
+            self.assertEqual(app.frequency_mhz, 41)
+            self.assertEqual(app.resolve_path(), path)
 
     def test_app_reloads_on_mtime(self):
         pytest.importorskip("panel")

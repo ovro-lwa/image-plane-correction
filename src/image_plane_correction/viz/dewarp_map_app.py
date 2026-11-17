@@ -21,7 +21,12 @@ from image_plane_correction.live_map import (
     load_tiptilt_npz,
     resolve_tiptilt_path,
 )
-from image_plane_correction.tiptilt_map import default_location
+from image_plane_correction.tiptilt_map import (
+    DEFAULT_WARP_DIR,
+    default_location,
+    frequency_mhz_from_filename,
+    warp_path_for_subband,
+)
 from image_plane_correction.viz.beam_overlay import (
     BeamMapRow,
     _hover_opts,
@@ -694,12 +699,19 @@ def _beam_table_html(rows: List[BeamMapRow]) -> str:
 class DewarpMapApp(param.Parameterized):
     """Param-driven live-dewarp view of beamformer tip-tilt for one subband."""
 
-    warp_path = param.String(default="", doc="Path to tip-tilt .npz (empty → etcd resolve)")
+    warp_path = param.String(
+        default="",
+        doc="Explicit tip-tilt .npz path (overrides warp_dir / etcd)",
+    )
+    warp_dir = param.String(
+        default=str(DEFAULT_WARP_DIR),
+        doc="Directory of per-subband warp_<N>MHz.npz files (empty → etcd only)",
+    )
     frequency_mhz = param.Integer(
         default=55,
         bounds=(1, 300),
         label="Subband MHz",
-        doc="Beamformer subband frequency (MHz); tip-tilt maps exist per subband",
+        doc="Beamformer subband frequency (MHz); selects warp_<N>MHz.npz under warp_dir",
     )
     poll_seconds = param.Number(default=3.0, bounds=(0.5, 60.0))
     stride = param.Integer(
@@ -764,11 +776,26 @@ class DewarpMapApp(param.Parameterized):
         hv.extension("bokeh", logo=False)
         pn.extension(sizing_mode="stretch_width")
 
+    def _map_source_label(self) -> str:
+        return _map_source_label_for(
+            warp_path=self.warp_path,
+            warp_dir=self.warp_dir,
+            frequency_mhz=int(self.frequency_mhz),
+        )
+
     def resolve_path(self) -> Optional[Path]:
-        """Return the NPZ path from ``warp_path`` or tip-tilt etcd for ``frequency_mhz``."""
+        """
+        Return the tip-tilt NPZ for this subband.
+
+        Precedence: explicit ``warp_path`` → ``warp_dir/warp_<N>MHz.npz`` →
+        tip-tilt etcd for ``frequency_mhz``.
+        """
         raw = (self.warp_path or "").strip()
         if raw:
             return Path(raw).expanduser()
+        warp_dir = (self.warp_dir or "").strip()
+        if warp_dir:
+            return warp_path_for_subband(int(self.frequency_mhz), warp_dir=warp_dir)
         resolved = resolve_tiptilt_path(int(self.frequency_mhz))
         if resolved:
             return Path(resolved)
@@ -813,8 +840,8 @@ class DewarpMapApp(param.Parameterized):
         path = self.resolve_path()
         if path is None:
             self.status = (
-                f"No warp path: set --warp-path or publish tip-tilt for "
-                f"subband {self.frequency_mhz} MHz"
+                f"No warp path: set --warp-path / --warp-dir or publish tip-tilt "
+                f"for subband {self.frequency_mhz} MHz"
             )
             return False
         if not path.is_file():
@@ -1089,7 +1116,7 @@ class DewarpMapApp(param.Parameterized):
                 f"# Live dewarp\n\n"
                 f"**Beamformer tip-tilt correction** for a subband "
                 f"(**{self.frequency_mhz} MHz**). "
-                f"Map path `{self.warp_path or '(from etcd)'}` — {demo_note}.\n\n"
+                f"Map `{self._map_source_label()}` — {demo_note}.\n\n"
                 f"Celestial **Mollweide** centred on **RA=0** (RA increases left). "
                 f"Samples use an **equal-area** RA/Dec lattice (uniform on Mollweide). "
                 f"Arrow **length** encodes |shift| in **arcmin**; "
@@ -1110,10 +1137,26 @@ class DewarpMapApp(param.Parameterized):
         return self.panel().servable(title=title)
 
 
+def _map_source_label_for(
+    *,
+    warp_path: str,
+    warp_dir: str,
+    frequency_mhz: int,
+) -> str:
+    raw = (warp_path or "").strip()
+    if raw:
+        return raw
+    directory = (warp_dir or "").strip()
+    if directory:
+        return str(warp_path_for_subband(int(frequency_mhz), warp_dir=directory))
+    return "(from etcd)"
+
+
 def create_app(
     *,
     warp_path: Optional[PathLike] = None,
-    frequency_mhz: int = 55,
+    warp_dir: Optional[PathLike] = DEFAULT_WARP_DIR,
+    frequency_mhz: Optional[int] = None,
     poll_seconds: float = 3.0,
     stride: int = 3,
     central_ra_deg: float = 0.0,
@@ -1128,8 +1171,19 @@ def create_app(
         demo = load_demo_pointings(demo_pointings_path)
     # central_az_deg kept as ignored alias for older call sites / CLI.
     _ = central_az_deg
+
+    path_str = "" if warp_path is None else str(Path(warp_path))
+    if frequency_mhz is None:
+        if path_str:
+            frequency_mhz = frequency_mhz_from_filename(path_str)
+        else:
+            raise ValueError(
+                "frequency_mhz is required unless --warp-path contains _<N>MHz"
+            )
+    dir_str = "" if warp_dir is None else str(Path(warp_dir))
     return DewarpMapApp(
-        warp_path="" if warp_path is None else str(Path(warp_path)),
+        warp_path=path_str,
+        warp_dir=dir_str,
         frequency_mhz=int(frequency_mhz),
         poll_seconds=float(poll_seconds),
         stride=int(stride),

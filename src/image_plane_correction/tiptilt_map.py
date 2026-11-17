@@ -75,6 +75,10 @@ def default_location() -> EarthLocation:
         )
 
 
+#: Default directory for per-subband tip-tilt warp NPZ files.
+DEFAULT_WARP_DIR = Path("/fast/claw/warps")
+
+
 def frequency_mhz_from_filename(path: PathLike) -> int:
     """Return the positive integer between ``_`` and ``MHz`` in the basename."""
     found = _FREQUENCY_IN_NAME.findall(os.path.basename(os.fspath(path)))
@@ -87,6 +91,22 @@ def frequency_mhz_from_filename(path: PathLike) -> int:
     if frequency_mhz <= 0:
         raise ValueError("frequency_mhz must be a positive integer")
     return frequency_mhz
+
+
+def warp_npz_basename(frequency_mhz: int) -> str:
+    """Return the conventional ``warp_<N>MHz.npz`` basename for a subband."""
+    if type(frequency_mhz) is not int or frequency_mhz <= 0:
+        raise ValueError("frequency_mhz must be a positive int")
+    return f"warp_{frequency_mhz}MHz.npz"
+
+
+def warp_path_for_subband(
+    frequency_mhz: int,
+    *,
+    warp_dir: PathLike = DEFAULT_WARP_DIR,
+) -> Path:
+    """Return ``warp_dir / warp_<N>MHz.npz`` for beamformer subband ``N``."""
+    return Path(warp_dir).expanduser() / warp_npz_basename(frequency_mhz)
 
 
 def subband_frequencies_mhz() -> Tuple[int, ...]:

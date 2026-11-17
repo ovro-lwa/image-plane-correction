@@ -5,19 +5,21 @@ Requires optional viz extras::
 
     pip install '.[viz]'
 
-Launch with Panel (preferred; one app instance per browser session)::
+Maps are per beamformer subband under a warp directory (default
+``/fast/claw/warps/warp_<N>MHz.npz``). Launch with Panel (preferred; one app
+instance per browser session)::
 
     PYTHONPATH=src panel serve scripts/serve_dewarp_map.py --show \\
-        --args --warp-path /fast/claw/warps/warp_55MHz.npz --frequency-mhz 55
+        --args --warp-dir /fast/claw/warps --frequency-mhz 55
 
 Or run this script directly (starts ``pn.serve``)::
 
     PYTHONPATH=src python scripts/serve_dewarp_map.py \\
-        --warp-path /fast/claw/warps/warp_55MHz.npz \\
-        --frequency-mhz 55 --poll-seconds 3 --show
+        --warp-dir /fast/claw/warps --frequency-mhz 55 --poll-seconds 3 --show
 
-Tip-tilt maps are per subband; pass ``--frequency-mhz`` for the subband to
-view. If ``--warp-path`` is omitted, the app resolves the path from
+Pass ``--warp-path`` to override the directory convention. If ``--frequency-mhz``
+is omitted and ``--warp-path`` contains ``_<N>MHz``, the subband is parsed from
+the filename. Pass ``--warp-dir ''`` with no ``--warp-path`` to resolve via
 ``mnc.tiptilt.get_tiptilt_path(frequency_mhz)`` when etcd/mnc are available.
 """
 
@@ -26,28 +28,49 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from image_plane_correction.tiptilt_map import (  # noqa: E402
+    DEFAULT_WARP_DIR,
+    frequency_mhz_from_filename,
+    warp_path_for_subband,
+)
+
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Serve live dewarp / beamformer tip-tilt correction map"
+        description=(
+            "Serve live dewarp / beamformer tip-tilt correction for a subband"
+        )
+    )
+    parser.add_argument(
+        "--warp-dir",
+        type=str,
+        default=str(DEFAULT_WARP_DIR),
+        help=(
+            "Directory of per-subband tip-tilt NPZ files "
+            f"(default: {DEFAULT_WARP_DIR}; empty string → skip, use etcd)"
+        ),
     )
     parser.add_argument(
         "--warp-path",
         type=Path,
         default=None,
-        help="Tip-tilt NPZ path (default: resolve via mnc tip-tilt etcd)",
+        help="Explicit tip-tilt NPZ path (overrides --warp-dir naming)",
     )
     parser.add_argument(
         "--frequency-mhz",
         type=int,
-        default=55,
-        help="Beamformer subband frequency in MHz (default: 55)",
+        default=None,
+        help=(
+            "Beamformer subband in MHz (selects warp_<N>MHz.npz under --warp-dir; "
+            "default: parse _<N>MHz from --warp-path, else 55)"
+        ),
     )
     parser.add_argument(
         "--poll-seconds",
@@ -107,12 +130,38 @@ def _parse_args(argv=None):
     return parser.parse_known_args(argv)[0]
 
 
+def _resolved_frequency_mhz(args: argparse.Namespace) -> int:
+    if args.frequency_mhz is not None:
+        freq = int(args.frequency_mhz)
+        if freq <= 0:
+            raise SystemExit("--frequency-mhz must be a positive int")
+        return freq
+    if args.warp_path is not None:
+        try:
+            return frequency_mhz_from_filename(args.warp_path)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Cannot parse subband from --warp-path: {exc}. "
+                "Pass --frequency-mhz explicitly."
+            ) from exc
+    # Historical default when serving from --warp-dir alone.
+    return 55
+
+
+def _resolved_warp_dir(args: argparse.Namespace) -> Optional[Path]:
+    raw = "" if args.warp_dir is None else str(args.warp_dir).strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
 def _build_app(args: argparse.Namespace):
     from image_plane_correction.viz.dewarp_map_app import create_app
 
     return create_app(
         warp_path=args.warp_path,
-        frequency_mhz=args.frequency_mhz,
+        warp_dir=_resolved_warp_dir(args),
+        frequency_mhz=_resolved_frequency_mhz(args),
         poll_seconds=args.poll_seconds,
         stride=args.stride,
         central_ra_deg=args.central_ra_deg,
@@ -132,9 +181,8 @@ _args = _parse_args()
 # ``panel serve`` imports this module per browser session — servable app attaches
 # its periodic callback via ``pn.state.onload``.
 if __name__ != "__main__":
-    _build_app(_args).servable(
-        title=f"Live dewarp · subband {_args.frequency_mhz} MHz"
-    )
+    _freq = _resolved_frequency_mhz(_args)
+    _build_app(_args).servable(title=f"Live dewarp · subband {_freq} MHz")
 
 if __name__ == "__main__":
     import threading
@@ -142,11 +190,19 @@ if __name__ == "__main__":
 
     import panel as pn
 
+    _freq = _resolved_frequency_mhz(_args)
+    _warp_dir = _resolved_warp_dir(_args)
+    if _args.warp_path is not None:
+        _warp_label = str(_args.warp_path)
+    elif _warp_dir is not None:
+        _warp_label = str(warp_path_for_subband(_freq, warp_dir=_warp_dir))
+    else:
+        _warp_label = "etcd"
+
     url = f"http://{_args.address}:{_args.port}/"
     print(
         f"Serving live dewarp at {url} "
-        f"(warp={_args.warp_path or 'etcd'}, "
-        f"subband={_args.frequency_mhz} MHz, poll={_args.poll_seconds}s)",
+        f"(warp={_warp_label}, subband={_freq} MHz, poll={_args.poll_seconds}s)",
         file=sys.stderr,
     )
     # Always show=False. Panel's show=True calls server.show('/') and opens a
@@ -171,6 +227,6 @@ if __name__ == "__main__":
         port=int(_args.port),
         address=_args.address,
         show=False,
-        title=f"Live dewarp · subband {_args.frequency_mhz} MHz",
+        title=f"Live dewarp · subband {_freq} MHz",
         websocket_origin=[f"{_args.address}:{_args.port}", f"localhost:{_args.port}"],
     )

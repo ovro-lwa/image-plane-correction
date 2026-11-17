@@ -21,11 +21,14 @@ if str(SRC_DIR) not in sys.path:
 
 from image_plane_correction.tiptilt_map import (  # noqa: E402
     DEFAULT_SUBBAND_FREQUENCIES_MHZ,
+    DEFAULT_WARP_DIR,
     frequency_mhz_from_filename,
     obstime_unix_from_header,
     pixel_flow_to_tiptilt_arrays,
     resolve_publish_frequencies_mhz,
     subband_frequencies_mhz,
+    warp_npz_basename,
+    warp_path_for_subband,
     write_tiptilt_npz,
 )
 
@@ -56,6 +59,17 @@ class TestTiptiltMap(unittest.TestCase):
         self.assertEqual(frequency_mhz_from_filename("/tmp/flow_82MHz_map.npz"), 82)
         with self.assertRaises(ValueError):
             frequency_mhz_from_filename("warp.npz")
+
+    def test_warp_path_for_subband(self):
+        self.assertEqual(warp_npz_basename(55), "warp_55MHz.npz")
+        self.assertEqual(warp_npz_basename(82), "warp_82MHz.npz")
+        self.assertEqual(
+            warp_path_for_subband(41, warp_dir="/fast/claw/warps"),
+            Path("/fast/claw/warps/warp_41MHz.npz"),
+        )
+        self.assertEqual(DEFAULT_WARP_DIR, Path("/fast/claw/warps"))
+        with self.assertRaises(ValueError):
+            warp_npz_basename(0)
 
     def test_resolve_publish_frequencies_single_and_all(self):
         self.assertEqual(

@@ -1,5 +1,9 @@
 # systemd --user unit for serve_dewarp_map.py (operator UI as user claw)
 #
+# Live dewarp / beamformer tip-tilt correction for one subband. Tip-tilt NPZ
+# files live under WarpDir as warp_<N>MHz.npz; set FrequencyMHz to the subband
+# this instance should show (duplicate the unit + Port for another subband).
+#
 # Prerequisites:
 #   pip install -e '.[viz]'   # panel, holoviews, bokeh, param in the ExecStart Python
 #   mnc + etcd3 on that env if using live beam pointings (omit for --demo-pointings)
@@ -7,7 +11,7 @@
 # Install:
 #   mkdir -p ~/.config/systemd/user
 #   cp scripts/serve_dewarp_map.service ~/.config/systemd/user/
-#   # edit WarpPath / FrequencyMHz / Port below, then:
+#   # edit WarpDir / FrequencyMHz / Port below, then:
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now serve_dewarp_map.service
 #   journalctl --user -u serve_dewarp_map -f
@@ -18,12 +22,12 @@
 #   loginctl enable-linger claw
 #
 # Notes:
-#   - Prefer an explicit --warp-path so the UI keeps working if tip-tilt etcd TTL expires.
+#   - Prefer --warp-dir so the UI keeps working if tip-tilt etcd TTL expires.
 #   - Beam marks need /mon/beamformer/{N}/pointing from mnc publish_commanded_pointing.
 #   - Bind stays on 127.0.0.1; use SSH tunnel or a reverse proxy for remote access.
 
 [Unit]
-Description=Live tip-tilt / dewarp map Panel app
+Description=Live dewarp / beamformer tip-tilt correction (Panel)
 After=default.target
 
 [Service]
@@ -31,12 +35,16 @@ Type=simple
 WorkingDirectory=/home/claw/code/image-plane-correction
 Environment=PYTHONPATH=/home/claw/code/image-plane-correction/src
 Environment=PATH=/opt/devel/claw/envs/py312/bin:/usr/bin
+# WarpDir holds per-subband maps: warp_<FrequencyMHz>MHz.npz
+Environment=WarpDir=/fast/claw/warps
+Environment=FrequencyMHz=55
+Environment=Port=5007
 ExecStart=/opt/devel/claw/envs/py312/bin/python \
   /home/claw/code/image-plane-correction/scripts/serve_dewarp_map.py \
-  --warp-path /fast/claw/warps/warp_55MHz.npz \
-  --frequency-mhz 55 \
+  --warp-dir ${WarpDir} \
+  --frequency-mhz ${FrequencyMHz} \
   --poll-seconds 3 \
-  --port 5007 \
+  --port ${Port} \
   --address 127.0.0.1
 Restart=on-failure
 RestartSec=15
