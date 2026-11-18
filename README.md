@@ -51,30 +51,34 @@ map at all frequencies while only one band is being solved).
 
 # Live dewarp map web app (`serve_dewarp_map`)
 
-Panel + HoloViews app showing the tip-tilt vector field in **zenithal equal-area**
-projection, with optional marks for active power beams. Requires viz extras
-(`pip install '.[viz]'`) plus runtime access to the warp NPZ; live beam marks need
-`mnc` / `etcd3` and beam pointing published by mnc
+Panel + HoloViews **live dewarp** view of **beamformer tip-tilt correction** for a
+subband (celestial Mollweide quiver), with optional marks for active power beams.
+Requires viz extras (`pip install '.[viz]'`) plus runtime access to the warp NPZ;
+live beam marks need `mnc` / `etcd3` and beam pointing published by mnc
 `publish_commanded_pointing` under `/mon/beamformer/{N}/pointing`.
+
+Tip-tilt maps are discovered under a warp directory (default `/lustre/claw/warps`)
+as `warp_<N>MHz.npz` for up to 16 beamformer subbands. The UI **Subband MHz**
+control selects which discovered map to display.
 
 ```bash
 # Install viz stack once (panel, holoviews, bokeh, param):
 pip install -e '.[viz]'
 
-# Serve against a local NPZ (path preferred over etcd for the UI):
+# Serve from the warp directory (discovers all warp_<N>MHz.npz; UI selects N):
 PYTHONPATH=src python scripts/serve_dewarp_map.py \
-  --warp-path /fast/claw/warps/warp_55MHz.npz \
-  --frequency-mhz 55 \
+  --warp-dir /lustre/claw/warps \
   --poll-seconds 3
 ```
 
 Then open `http://127.0.0.1:5007/` once in a browser. Pass `--show` only if you
 want the script to open that URL for you — do not also click the printed URL
-(that opens a second tab). Omit `--warp-path` to resolve the map via
-`mnc.tiptilt.get_tiptilt_path(frequency_mhz)` when the tip-tilt catalog is
-published. Beam discovery uses `mnc.ezdr.discover_recorders(type='power')`.
+(that opens a second tab). Optional `--frequency-mhz` only sets the initial
+selection. Override with `--warp-path` to lock a single file; use `--warp-dir ''`
+to resolve via `mnc.tiptilt.get_tiptilt_path` for the selected catalog subband.
+Beam discovery uses `mnc.ezdr.discover_recorders(type='power')`.
 
-**Pointing display rule** (app frequency `F` MHz): use
+**Pointing display rule** (subband `F` MHz): use
 `value.commanded_by_frequency_mhz["F"]` when present, else `value.nominal`.
 Pointings older than `--max-pointing-age-sec` (default 120) are marked stale.
 Offline UI work without etcd: omit `--demo-pointings` for map-only, or pass a
@@ -82,7 +86,7 @@ JSON file of `/mon/beamformer/{N}/pointing` payloads (`{"beams": {"N": {...}}}`)
 when you need synthetic marks. The checked-in
 `tests/fixtures/demo_pointings_55mhz.json` is empty by default.
 
-**Dependencies to keep in mind:** tip-tilt etcd TTL (UI can still read `--warp-path`
+**Dependencies to keep in mind:** tip-tilt etcd TTL (UI can still read `--warp-dir`
 after TTL expiry); beam marks require an mnc build that publishes
 `/mon/beamformer/{N}/pointing` from `set_beam_pointing(s)`.
 
@@ -97,16 +101,16 @@ tip-tilt NPZ) and the Panel app. Use the same NPZ path in both.
 cd /home/claw/code/image-plane-correction
 source /opt/devel/claw/envs/py312/bin/activate   # or your usual env
 pip install -e '.[viz]'                          # Panel deps; watcher needs jax/GPU + funpack
-mkdir -p /fast/claw/warps ~/.config/systemd/user
+mkdir -p /lustre/claw/warps ~/.config/systemd/user
 loginctl enable-linger claw                      # optional: keep units after logout
 ```
 
 Edit `scripts/watch_calcflow_warp.service` before installing: set `--watch-dir`
 (parent of pipeline `YYYY-MM-DD` day dirs that hold `*.fits.fz`) and
-`--output-dir` / `--warp-filename` (e.g. `/fast/claw/warps` + `warp_55MHz.npz`).
-`serve_dewarp_map.service` already points at `/fast/claw/warps/warp_55MHz.npz`
-on port `5007`; change frequency or port if needed. Both units assume Python at
-`/opt/devel/claw/envs/py312/bin`.
+`--output-dir` / `--warp-filename` (e.g. `/lustre/claw/warps` + `warp_<N>MHz.npz`).
+`serve_dewarp_map.service` reads `--warp-dir /lustre/claw/warps` (port `5007`) and
+lets the Panel UI choose among discovered `warp_<N>MHz.npz` subbands. Both units
+assume Python at `/opt/devel/claw/envs/py312/bin`.
 
 **Install and start**
 
@@ -124,15 +128,15 @@ systemctl --user enable --now serve_dewarp_map.service
 systemctl --user status watch_calcflow_warp serve_dewarp_map
 journalctl --user -u watch_calcflow_warp -f    # in one terminal
 journalctl --user -u serve_dewarp_map -f       # in another
-ls -l /fast/claw/warps/warp_55MHz.npz
+ls -l /lustre/claw/warps/warp_*MHz.npz
 ```
 
 Open **http://127.0.0.1:5007/** once. The app binds to localhost; use an SSH
 tunnel or reverse proxy for remote access. After a new snapshot settles, the
 NPZ mtime should update and the UI should refresh within about one
-`--poll-seconds` interval. Omit demo pointings in production so beam marks
-come from live etcd. One frequency per app instance — duplicate the serve unit
-with another `--warp-path` / `--frequency-mhz` / `--port` for another band.
+`--poll-seconds` interval (new `warp_<N>MHz.npz` files are rediscovered on the
+same poll). Omit demo pointings in production so beam marks come from live
+etcd. One service instance covers all subbands in `WarpDir` (up to 16).
 
 Templates with more comments: `scripts/watch_calcflow_warp.service`,
 `scripts/serve_dewarp_map.service`.
