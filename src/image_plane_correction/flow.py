@@ -558,6 +558,7 @@ def calcflow(
     target_size: Optional[int] = None,
     target_wcs: Optional[Any] = None,
     resample_method: Literal["interp", "adaptive", "exact"] = "interp",
+    dewarp: bool = True,
 ):
     """
     Compute optical flow and dewarp an image using a theoretical sky model,
@@ -566,6 +567,11 @@ def calcflow(
     Brox smoothness ``alpha`` and gradient ``gamma`` default to values used historically in
     this pipeline; dataset-specific tuning can be done with ``scripts/optimize_alpha_gamma.py``
     (coarse log-space ``--search`` and optional ``--refine``).
+
+    Set ``dewarp=False`` to skip ``Flow.apply_broadcast`` when only the warp offsets are
+    needed (e.g. live warp-map writers). Dewarping is still forced on when ``write``,
+    ``qa``, or ``catalog_qa`` require the dewarped image; in that case the fourth return
+    value is ``None`` only if none of those need it.
 
     Set ``use_best_pb_model=True`` to use the best primary-beam response model
     provided by ``theoretical_sky_beam_function``. Observation time (ISOT) and
@@ -656,7 +662,10 @@ def calcflow(
         or reference_sky_fn is not None
     ), "Must provide cleaned=True, PSF file, `reference_sky`, or `reference_sky_fn`"
 
-    input_header = fits.getheader(image_fn)
+    # Single open: header + array + WCS (avoids a separate fits.getheader pass).
+    image, source_imwcs, input_header = data.fits_image(
+        image_fn, squeeze=False, return_header=True
+    )
     obs_date, freq_hz = _obs_date_isot_and_freq_hz_from_header(input_header)
     if use_best_pb_model and (obs_date is None or freq_hz is None):
         raise ValueError(
@@ -665,7 +674,6 @@ def calcflow(
             f"Could not parse for {image_fn!r}: obs_date={obs_date!r}, freq_hz={freq_hz!r}."
         )
 
-    image, source_imwcs = data.fits_image(image_fn, squeeze=False)
     image = _sanitize_finite_jax(image, os.path.basename(image_fn))
     source_image_spatial_shape = _spatial_shape_from_array(image)
 
@@ -770,9 +778,10 @@ def calcflow(
         )
         reference_hdu = fits.PrimaryHDU(data=np.asarray(ref_data), header=ref_header)
 
-    # Build the PSF kernel on the *active* (post-reproject) grid when needed.
+    # Build the PSF kernel only when we still need to synthesize reference_sky.
+    # Callers that pass a cached ``reference_sky`` skip catalog+PSF construction.
     psf = None
-    if cleaned:
+    if reference_hdu is None and cleaned:
         # Cleaned images use beam metadata from FITS headers; the kernel must live
         # at the same pixel scale as the image being analyzed. When ``psf_fn`` is
         # supplied, beam keys are read from that file's header; otherwise from the
@@ -803,7 +812,7 @@ def calcflow(
                 imwcs=imwcs,
                 shape=(size, size),
             )
-    elif psf_fn is not None:
+    elif reference_hdu is None and psf_fn is not None:
         psf_np, psf_wcs = data.fits_image(psf_fn)
         psf_np = np.asarray(psf_np)
         if target_size is not None and int(target_size) != int(source_image_spatial_shape[0]):
@@ -868,7 +877,9 @@ def calcflow(
         gamma=gamma,
         scale_factor=scale_factor,
     )
-    dewarped = flow.apply_broadcast(image)
+    # Skip apply_broadcast when the caller only needs offsets (warp-map services).
+    need_dewarped = bool(dewarp or write or qa or catalog_qa)
+    dewarped = flow.apply_broadcast(image) if need_dewarped else None
 
     if qa:
         bright_source_kwargs = None
@@ -926,24 +937,25 @@ def calcflow(
         if outroot is None:
             raise ValueError("`outroot` must be provided when write=True or write_reference_sky=True")
         if (qa and qa_passed) or not qa:
-            dewarped_arr = np.asarray(dewarped)
-            output_header = _build_preserved_output_header(
-                input_header, imwcs, tuple(int(s) for s in dewarped_arr.shape)
-            )
-
             if write:
+                assert dewarped is not None
+                dewarped_arr = np.asarray(dewarped)
+                output_header = _build_preserved_output_header(
+                    input_header, imwcs, tuple(int(s) for s in dewarped_arr.shape)
+                )
                 outname = os.path.join(
                     outroot, os.path.basename(image_fn.replace(".fits", "_dewarp.fits"))
                 )
                 fits.writeto(outname, dewarped_arr, output_header)
-
             if write_reference_sky:
+                ref_arr = np.asarray(reference_hdu.data)
+                ref_header = _build_preserved_output_header(
+                    input_header, imwcs, tuple(int(s) for s in ref_arr.shape)
+                )
                 ref_outname = os.path.join(
                     outroot, os.path.basename(image_fn.replace(".fits", "_reference.fits"))
                 )
-                fits.writeto(
-                    ref_outname, np.asarray(reference_hdu.data), output_header
-                )
+                fits.writeto(ref_outname, ref_arr, ref_header)
         else:
             msg = f"image {image_fn} failed qa. Not writing outputs."
             print(msg)

@@ -1,0 +1,6 @@
+FROM nvcr.io/nvidia/pytorch:24.07-py3
+WORKDIR /workspace/notebooks
+RUN pip install scikit-image astropy jupyter matplotlib
+RUN git clone https://github.com/ovro-lwa/image-plane-correction.git -b cjl/dev
+RUN cd image-plane-correction && pip install .
+ENTRYPOINT jupyter notebook --no-browser

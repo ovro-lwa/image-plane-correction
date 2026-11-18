@@ -23,6 +23,120 @@ For the sake of development, I would also recommend adding the `-e` flag to the 
 For GPU acceleration, ensure that JAX is installed with [CUDA support](https://jax.readthedocs.io/en/latest/installation.html#installation).
 As mentioned previously, OpenCV must be built from source for CUDA support and should be accessible as `cv2` for the optical flow code to work properly.
 
+# Live tip-tilt warp maps (`watch_calcflow_warp`)
+
+`scripts/watch_calcflow_warp.py` (and `scripts/mock_calcflow_warp_arrival.py`) poll
+pipeline `*.fits.fz` snapshots under the latest UT day subdirectory
+(`YYYY-MM-DD` children of `--watch-dir`), run `calcflow`, and write a
+**tip-tilt named-array `.npz`** suitable for `mnc.tiptilt` (`az_deg`,
+`el_deg`, `dra_arcsec`, `ddec_arcsec`, `obstime_unix`). When a newer day folder
+appears, the watcher switches to it. By default the absolute path is published
+with `mnc.tiptilt.set_tiptilt` under etcd `/mon/beamformer/tiptilt` (with a TTL;
+trackers fall back to zero shift if the key expires while the file may still
+exist on disk).
+
+```bash
+PYTHONPATH=src python scripts/watch_calcflow_warp.py \
+  --watch-dir /path/to/snapshots/55MHz \
+  --output-dir /path/to/warps \
+  --warp-filename warp_55MHz.npz \
+  --cleaned --process-existing
+```
+
+Use `--no-publish-tiptilt` to write the NPZ without updating etcd. Frequency for
+publish is taken from `_(\d+)MHz` in the warp filename (or `--frequency-mhz`).
+Pass `--publish-all-frequencies` to register the **same** NPZ under every
+OVRO-LWA subband key in `/mon/beamformer/tiptilt` (so BeamTracker applies that
+map at all frequencies while only one band is being solved).
+
+# Live dewarp map web app (`serve_dewarp_map`)
+
+Panel + HoloViews app showing the tip-tilt vector field in **zenithal equal-area**
+projection, with optional marks for active power beams. Requires viz extras
+(`pip install '.[viz]'`) plus runtime access to the warp NPZ; live beam marks need
+`mnc` / `etcd3` and beam pointing published by mnc
+`publish_commanded_pointing` under `/mon/beamformer/{N}/pointing`.
+
+```bash
+# Install viz stack once (panel, holoviews, bokeh, param):
+pip install -e '.[viz]'
+
+# Serve against a local NPZ (path preferred over etcd for the UI):
+PYTHONPATH=src python scripts/serve_dewarp_map.py \
+  --warp-path /fast/claw/warps/warp_55MHz.npz \
+  --frequency-mhz 55 \
+  --poll-seconds 3
+```
+
+Then open `http://127.0.0.1:5007/` once in a browser. Pass `--show` only if you
+want the script to open that URL for you — do not also click the printed URL
+(that opens a second tab). Omit `--warp-path` to resolve the map via
+`mnc.tiptilt.get_tiptilt_path(frequency_mhz)` when the tip-tilt catalog is
+published. Beam discovery uses `mnc.ezdr.discover_recorders(type='power')`.
+
+**Pointing display rule** (app frequency `F` MHz): use
+`value.commanded_by_frequency_mhz["F"]` when present, else `value.nominal`.
+Pointings older than `--max-pointing-age-sec` (default 120) are marked stale.
+Offline UI work without etcd: omit `--demo-pointings` for map-only, or pass a
+JSON file of `/mon/beamformer/{N}/pointing` payloads (`{"beams": {"N": {...}}}`)
+when you need synthetic marks. The checked-in
+`tests/fixtures/demo_pointings_55mhz.json` is empty by default.
+
+**Dependencies to keep in mind:** tip-tilt etcd TTL (UI can still read `--warp-path`
+after TTL expiry); beam marks require an mnc build that publishes
+`/mon/beamformer/{N}/pointing` from `set_beam_pointing(s)`.
+
+# Deploy (systemd `--user`)
+
+Two units under `scripts/` run as user `claw`: the watcher (new `*.fits.fz` →
+tip-tilt NPZ) and the Panel app. Use the same NPZ path in both.
+
+**One-time setup**
+
+```bash
+cd /home/claw/code/image-plane-correction
+source /opt/devel/claw/envs/py312/bin/activate   # or your usual env
+pip install -e '.[viz]'                          # Panel deps; watcher needs jax/GPU + funpack
+mkdir -p /fast/claw/warps ~/.config/systemd/user
+loginctl enable-linger claw                      # optional: keep units after logout
+```
+
+Edit `scripts/watch_calcflow_warp.service` before installing: set `--watch-dir`
+(parent of pipeline `YYYY-MM-DD` day dirs that hold `*.fits.fz`) and
+`--output-dir` / `--warp-filename` (e.g. `/fast/claw/warps` + `warp_55MHz.npz`).
+`serve_dewarp_map.service` already points at `/fast/claw/warps/warp_55MHz.npz`
+on port `5007`; change frequency or port if needed. Both units assume Python at
+`/opt/devel/claw/envs/py312/bin`.
+
+**Install and start**
+
+```bash
+cp scripts/watch_calcflow_warp.service scripts/serve_dewarp_map.service \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now watch_calcflow_warp.service
+systemctl --user enable --now serve_dewarp_map.service
+```
+
+**Check**
+
+```bash
+systemctl --user status watch_calcflow_warp serve_dewarp_map
+journalctl --user -u watch_calcflow_warp -f    # in one terminal
+journalctl --user -u serve_dewarp_map -f       # in another
+ls -l /fast/claw/warps/warp_55MHz.npz
+```
+
+Open **http://127.0.0.1:5007/** once. The app binds to localhost; use an SSH
+tunnel or reverse proxy for remote access. After a new snapshot settles, the
+NPZ mtime should update and the UI should refresh within about one
+`--poll-seconds` interval. Omit demo pointings in production so beam marks
+come from live etcd. One frequency per app instance — duplicate the serve unit
+with another `--warp-path` / `--frequency-mhz` / `--port` for another band.
+
+Templates with more comments: `scripts/watch_calcflow_warp.service`,
+`scripts/serve_dewarp_map.service`.
+
 # Tuning optical-flow Brox parameters (alpha / gamma)
 
 Dense optical flow uses OpenCV Brox parameters ``alpha`` (smoothness) and ``gamma``

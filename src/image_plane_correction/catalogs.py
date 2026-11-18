@@ -1,26 +1,55 @@
 """Functions for loading true-sky radio sources from various catalogs"""
 
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable, Literal, Tuple, Union
 
 import astropy.units as u
 import astropy.wcs as wcs
-from astropy.wcs.utils import pixel_to_skycoord
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from astropy.coordinates import SkyCoord
+from astropy.wcs.utils import pixel_to_skycoord
 from jax.scipy.signal import convolve
 from jaxtyping import Array
 
 from .flow import Flow
 from .util import gkern
 
-from functools import lru_cache
-
 NVSS_CATALOG = "/fastpool/zwhuang/catalogs/nvss_trim.dat"
 VLSSR_CATALOG = "/fastpool/zwhuang/catalogs/vlssr_radecpeak.txt"
 
 Catalog = Union[Literal["NVSS"], Literal["VLSSR"]]
+
+
+def _resolved_catalog_path(path: str) -> str:
+    return str(Path(path).expanduser().resolve())
+
+
+def _catalog_file_stamp(path: str) -> Tuple[str, int, int]:
+    """Return ``(resolved_path, mtime_ns, size)`` for cache invalidation on replace."""
+    resolved = _resolved_catalog_path(path)
+    st = Path(resolved).stat()
+    return resolved, int(st.st_mtime_ns), int(st.st_size)
+
+
+@lru_cache(maxsize=8)
+def _nvss_table(resolved_path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    _ = (mtime_ns, size)
+    return pd.read_csv(resolved_path, sep=r"\s+")
+
+
+@lru_cache(maxsize=8)
+def _vlssr_table(resolved_path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    _ = (mtime_ns, size)
+    return pd.read_csv(resolved_path, sep=" ")
+
+
+def clear_catalog_cache() -> None:
+    """Drop memoized catalog DataFrames (e.g. after tests or catalog updates)."""
+    _nvss_table.cache_clear()
+    _vlssr_table.cache_clear()
 
 
 def reference_sources(catalog: Catalog, min_flux=0, path=None) -> Tuple[SkyCoord, Array]:
@@ -303,7 +332,7 @@ def theoretical_sky_beam_function(
 def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = NVSS_CATALOG
-    nvss = pd.read_csv(path, sep=r"\s+")
+    nvss = _nvss_table(*_catalog_file_stamp(path))
     sorted_nvss = nvss.sort_values(by=["f"])
 
     # cut off refernce sources below a certain flux density
@@ -334,11 +363,10 @@ def reference_sources_nvss(min_flux=270, path=None) -> Tuple[SkyCoord, Array]:
 
 # min_flux should be in terms of mJy, but for some reason the VLSSR intensity
 # seems to be in terms of 0.1 mJys.
-@lru_cache
 def reference_sources_vlssr(min_flux=10, path=None) -> Tuple[SkyCoord, Array]:
     if path is None:
         path = VLSSR_CATALOG
-    vlssr = pd.read_csv(path, sep=" ")
+    vlssr = _vlssr_table(*_catalog_file_stamp(path))
     sorted_vlssr = vlssr.sort_values(by="PEAK INT")
     sorted_vlssr = sorted_vlssr[sorted_vlssr["PEAK INT"] >= min_flux * 10]
 
