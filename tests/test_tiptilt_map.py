@@ -66,10 +66,10 @@ class TestTiptiltMap(unittest.TestCase):
         self.assertEqual(warp_npz_basename(55), "warp_55MHz.npz")
         self.assertEqual(warp_npz_basename(82), "warp_82MHz.npz")
         self.assertEqual(
-            warp_path_for_subband(41, warp_dir="/fast/claw/warps"),
-            Path("/fast/claw/warps/warp_41MHz.npz"),
+            warp_path_for_subband(41, warp_dir="/lustre/claw/warps"),
+            Path("/lustre/claw/warps/warp_41MHz.npz"),
         )
-        self.assertEqual(DEFAULT_WARP_DIR, Path("/fast/claw/warps"))
+        self.assertEqual(DEFAULT_WARP_DIR, Path("/lustre/claw/warps"))
         self.assertEqual(MAX_WARP_SUBBANDS, 16)
         self.assertEqual(len(DEFAULT_SUBBAND_FREQUENCIES_MHZ), 16)
         with self.assertRaises(ValueError):

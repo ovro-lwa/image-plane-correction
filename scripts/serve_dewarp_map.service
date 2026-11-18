@@ -36,7 +36,7 @@ WorkingDirectory=/home/claw/code/image-plane-correction
 Environment=PYTHONPATH=/home/claw/code/image-plane-correction/src
 Environment=PATH=/opt/devel/claw/envs/py312/bin:/usr/bin
 # WarpDir holds per-subband maps: warp_<N>MHz.npz (up to 16; UI selects N)
-Environment=WarpDir=/fast/claw/warps
+Environment=WarpDir=/lustre/claw/warps
 Environment=Port=5007
 ExecStart=/opt/devel/claw/envs/py312/bin/python \
   /home/claw/code/image-plane-correction/scripts/serve_dewarp_map.py \

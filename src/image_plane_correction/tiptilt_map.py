@@ -76,7 +76,7 @@ def default_location() -> EarthLocation:
 
 
 #: Default directory for per-subband tip-tilt warp NPZ files.
-DEFAULT_WARP_DIR = Path("/fast/claw/warps")
+DEFAULT_WARP_DIR = Path("/lustre/claw/warps")
 
 #: Max concurrent beamformer subbands the live-dewarp UI expects (OVRO-LWA).
 MAX_WARP_SUBBANDS = 16

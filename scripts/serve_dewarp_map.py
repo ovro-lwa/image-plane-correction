@@ -6,17 +6,17 @@ Requires optional viz extras::
     pip install '.[viz]'
 
 Discovers up to 16 per-subband tip-tilt maps under a warp directory (default
-``/fast/claw/warps/warp_<N>MHz.npz``). The UI lets the operator select any
+``/lustre/claw/warps/warp_<N>MHz.npz``). The UI lets the operator select any
 discovered subband. Launch with Panel (preferred; one app instance per browser
 session)::
 
     PYTHONPATH=src panel serve scripts/serve_dewarp_map.py --show \\
-        --args --warp-dir /fast/claw/warps
+        --args --warp-dir /lustre/claw/warps
 
 Or run this script directly (starts ``pn.serve``)::
 
     PYTHONPATH=src python scripts/serve_dewarp_map.py \\
-        --warp-dir /fast/claw/warps --poll-seconds 3 --show
+        --warp-dir /lustre/claw/warps --poll-seconds 3 --show
 
 Optional ``--frequency-mhz`` only sets the initial subband selection when that
 map is present. Pass ``--warp-path`` to lock the app to a single NPZ. Pass
